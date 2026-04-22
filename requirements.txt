@@ -1,0 +1,6 @@
+aiogram>=3.5.0
+SQLAlchemy>=2.0.29
+asyncpg>=0.29.0
+APScheduler>=3.10.4
+pydantic>=2.7.0
+pydantic-settings>=2.2.1
