@@ -651,6 +651,11 @@ async def show_day_details(callback: CallbackQuery):
     else:
         text = f"📅 **Записи на {date_str}**\n👤 Мастер: **{master.name}**\n\n"
         for appt in appointments:
+            print(f"--- DEBUG ---")
+            print(f"ID записи: {appt.id}")
+            print(f"Время в БД: {appt.datetime}") 
+            print(f"Зона: {appt.datetime.tzinfo}")
+            print(f"-------------")
             time_str = appt.datetime.strftime('%H:%M')
             client_name = appt.client.full_name if appt.client else "Клиент"
             text += f"⏰ {time_str} — {client_name}\n🔹 {appt.service.name}\n\n"

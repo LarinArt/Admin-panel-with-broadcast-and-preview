@@ -18,6 +18,8 @@ from app.config import get_settings
 from app.database.engine import SessionLocal
 from app.database.models import Appointment, AppointmentStatus, Service, User, UserRole, Organization
 from app.services.booking import calculate_available_slots
+from app.bot.callbacks import AppointmentConfirm
+
 
 router = Router(name="client")
 settings = get_settings()
@@ -201,7 +203,7 @@ async def pick_time(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("confirm:"))
+@router.callback_query(F.data.startswith("confirm:")) # Исправлено: теперь бот знает, что ловить
 async def confirm_booking(callback: CallbackQuery) -> None:
     _, service_id_raw, dt_iso = callback.data.split(":", maxsplit=2)
     service_id = int(service_id_raw)
@@ -239,3 +241,41 @@ async def confirm_booking(callback: CallbackQuery) -> None:
     )
     await callback.answer()
 
+@router.callback_query(AppointmentConfirm.filter())
+async def confirm_appointment_handler(callback: CallbackQuery, callback_data: AppointmentConfirm):
+    """
+    Обработчик нажатия на кнопку '✅ Я буду' из автоматического напоминания
+    """
+    async with SessionLocal() as session:
+        # 1. Ищем запись в базе по ID
+        appointment = await session.get(Appointment, callback_data.appointment_id)
+        
+        if not appointment:
+            await callback.answer("Запись не найдена", show_alert=True)
+            return
+
+        # 2. Если запись уже подтверждена, просто уведомляем
+        if appointment.status == AppointmentStatus.CONFIRMED:
+             # Здесь можно добавить проверку на новый статус, если ты его ввел
+             # Например: if appointment.status == AppointmentStatus.CONFIRMED_BY_CLIENT:
+             await callback.answer("Визит уже был подтвержден ранее!")
+             await callback.message.edit_reply_markup(reply_markup=None)
+             return
+
+        # 3. Обновляем статус
+        appointment.status = AppointmentStatus.CONFIRMED
+        await session.commit()
+
+    # 4. Визуальный отклик для пользователя
+    # Убираем кнопку и добавляем текст к существующему сообщению
+    try:
+        await callback.message.edit_text(
+            text=callback.message.text + "\n\n✅ <b>Вы подтвердили свой визит. Ждем вас!</b>",
+            parse_mode="HTML",
+            reply_markup=None # Убираем кнопку, чтобы нельзя было нажать дважды
+        )
+    except Exception:
+        # На случай, если сообщение нельзя отредактировать
+        await callback.message.answer("✅ Визит успешно подтвержден! Ждем вас.")
+
+    await callback.answer("Визит подтвержден!")

@@ -77,8 +77,8 @@ class Appointment(Base):
     datetime: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     status: Mapped[AppointmentStatus] = mapped_column(Enum(AppointmentStatus), default=AppointmentStatus.CONFIRMED, index=True)
     
-    reminder_24h_sent: Mapped[bool] = mapped_column(default=False)
-    reminder_2h_sent: Mapped[bool] = mapped_column(default=False)
+    reminder_24h_sent: Mapped[bool] = mapped_column(default=False, index=True)
+    reminder_2h_sent: Mapped[bool] = mapped_column(default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     client: Mapped["User"] = relationship(back_populates="appointments")
