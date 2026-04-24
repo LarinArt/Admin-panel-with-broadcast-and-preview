@@ -32,20 +32,25 @@ async def _send_due_reminders(bot: Bot) -> None:
             .where(
                 and_(
                     Appointment.status == AppointmentStatus.CONFIRMED,
+                    Appointment.client_id.is_not(None),
                     Appointment.datetime > now,
                     Appointment.datetime <= now + timedelta(hours=25),
                 )
             )
         )
         appointments = (await session.scalars(stmt)).all()
+        tolerance_hours = max(settings.scheduler_poll_seconds / 3600, 1 / 60)
 
         for appointment in appointments:
-            delta = appointment.datetime.replace(tzinfo=None) - datetime.now().replace(tzinfo=None)
+            if not appointment.client or not appointment.client.telegram_id:
+                continue
+            appt_dt = appointment.datetime.astimezone(tz)
+            delta = appt_dt - now
             hours_to_appt = delta.total_seconds() / 3600
 
             # Определяем, какое именно напоминание нужно отправить
-            send_24h = not appointment.reminder_24h_sent and 23.5 <= hours_to_appt <= 24.5
-            send_2h = not appointment.reminder_2h_sent and 1.5 <= hours_to_appt <= 2.5
+            send_24h = not appointment.reminder_24h_sent and abs(hours_to_appt - 24) <= tolerance_hours
+            send_2h = not appointment.reminder_2h_sent and abs(hours_to_appt - 2) <= tolerance_hours
 
             if not (send_24h or send_2h):
                 continue

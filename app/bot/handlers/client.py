@@ -1,10 +1,10 @@
 from datetime import date, datetime
 
 from aiogram import F, Router
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from sqlalchemy import select
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -29,27 +29,76 @@ class BookingState(StatesGroup):
     service_id = State()
     booking_date = State()
 
+
 class BusinessSetupState(StatesGroup):
     name = State()         # Ожидаем название компании
     category = State()     # Ожидаем выбор категории
 
 
-async def _get_or_create_user(message: Message) -> User:
+class OnboardingState(StatesGroup):
+    waiting_contact = State()
+
+
+def _phone_request_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="📱 Поделиться контактом", request_contact=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+async def _get_or_create_user(message: Message, selected_lang: str | None = None) -> User:
     async with SessionLocal() as session:
         user = await session.scalar(select(User).where(User.telegram_id == message.from_user.id))
         if user:
+            # Если пользователь уже существует, но его ID есть в списке master-admin,
+            # автоматически поднимаем роль до SUPER_ADMIN.
+            if message.from_user.id in settings.admin_telegram_ids and user.role != UserRole.SUPER_ADMIN:
+                user.role = UserRole.SUPER_ADMIN
+            if selected_lang:
+                user.language_code = selected_lang
+            await session.commit()
             return user
 
-        role = UserRole.ADMIN if message.from_user.id in settings.admin_telegram_ids else UserRole.CLIENT
+        role = UserRole.SUPER_ADMIN if message.from_user.id in settings.admin_telegram_ids else UserRole.CLIENT
         user = User(
             telegram_id=message.from_user.id,
             full_name=message.from_user.full_name,
             role=role,
+            language_code=selected_lang or (message.from_user.language_code or "ru")[:2],
         )
         session.add(user)
         await session.commit()
         await session.refresh(user)
         return user
+
+
+async def _try_link_deep_appointment(message: Message, user: User, start_arg: str | None, t) -> None:
+    if not start_arg or not start_arg.startswith("book_"):
+        return
+    appointment_id_raw = start_arg.replace("book_", "", 1)
+    if not appointment_id_raw.isdigit():
+        await message.answer(t("start_link_not_found"))
+        return
+
+    async with SessionLocal() as session:
+        appointment = await session.get(Appointment, int(appointment_id_raw))
+        if not appointment:
+            await message.answer(t("start_link_not_found"))
+            return
+        if appointment.client_id and appointment.client_id != user.id:
+            await message.answer(t("start_link_already"))
+            return
+
+        appointment.client_id = user.id
+        await session.commit()
+    await message.answer(t("start_link_success"))
+
+
+async def _require_phone_by_tg_id(tg_id: int) -> bool:
+    async with SessionLocal() as session:
+        user = await session.scalar(select(User).where(User.telegram_id == tg_id))
+        return bool(user and user.phone_number)
 
 # 1. Начало регистрации — спрашиваем название
 @router.callback_query(F.data == "setup_business")
@@ -111,9 +160,46 @@ async def process_business_category(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-@router.message(Command("start"))
-async def start(message: Message) -> None:
+@router.message(Command("lang"))
+async def choose_lang(message: Message):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Українська", callback_data="lang:uk")
+    builder.button(text="Русский", callback_data="lang:ru")
+    builder.button(text="English", callback_data="lang:en")
+    builder.adjust(1)
+    await message.answer("Выберите язык / Оберіть мову / Choose language", reply_markup=builder.as_markup())
+
+
+@router.callback_query(F.data.startswith("lang:"))
+async def save_lang(callback: CallbackQuery):
+    lang = callback.data.split(":")[1]
+    async with SessionLocal() as session:
+        user = await session.scalar(select(User).where(User.telegram_id == callback.from_user.id))
+        if user:
+            user.language_code = lang
+            await session.commit()
+    await callback.answer("Сохранено")
+    await callback.message.answer("Язык сохранен.")
+
+
+@router.message(CommandStart())
+async def start(message: Message, state: FSMContext, t) -> None:
+    start_arg = None
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) > 1:
+        start_arg = parts[1]
+
     user = await _get_or_create_user(message)
+    is_root_admin = message.from_user.id in settings.admin_telegram_ids
+
+    # Обязательный онбординг телефона только для обычного клиента.
+    if user.role == UserRole.CLIENT and not user.phone_number:
+        await state.set_state(OnboardingState.waiting_contact)
+        await state.update_data(start_arg=start_arg)
+        await message.answer(t("onboarding_share_phone"), reply_markup=_phone_request_kb())
+        return
+
+    await _try_link_deep_appointment(message, user, start_arg, t)
     
     async with SessionLocal() as session:
         # Ищем, создана ли уже организация для этого бота
@@ -123,35 +209,55 @@ async def start(message: Message) -> None:
     
     # 1. Если организация уже есть
     if existing_org:
-        if user.role == UserRole.ADMIN:
-            welcome_text = (
-                f"👋 Привет, {user.full_name}!\n\n"
-                f"Вы являетесь администратором **{existing_org.name}**.\n"
-                "Используйте панель управления для настройки услуг."
-            )
+        # Для master-admin из .env даем доступ в админку независимо от состояния БД.
+        if is_root_admin or user.role in (UserRole.ADMIN, UserRole.SUPER_ADMIN):
+            welcome_text = t("start_admin_welcome", org_name=existing_org.name)
             builder.button(text="📈 Управление платформой", callback_data="admin_panel")
         else:
-            welcome_text = (
-                f"👋 Добро пожаловать в **{existing_org.name}**!\n"
-                f"Сфера: {existing_org.category}\n\n"
-                "Выберите услугу для записи:"
-            )
+            welcome_text = t("start_client_welcome", org_name=existing_org.name)
             builder.button(text="📅 Записаться на услугу", callback_data="show_services_list")
     
     # 2. Если организации еще нет (самый первый запуск бота)
     else:
-        welcome_text = (
-            "🚀 Система готова к работе!\n\n"
-            "Похоже, вы первый пользователь. Создайте свой бизнес, чтобы клиенты могли начать запись."
-        )
+        welcome_text = t("start_create_business")
         builder.button(text="🏗 Создать свой бизнес", callback_data="setup_business")
 
     builder.adjust(1)
     await message.answer(welcome_text, reply_markup=builder.as_markup())
 
 
+@router.message(OnboardingState.waiting_contact, F.contact)
+async def save_phone_onboarding(message: Message, state: FSMContext, t):
+    if not message.contact or message.contact.user_id != message.from_user.id:
+        await message.answer(t("onboarding_phone_invalid"))
+        return
+
+    async with SessionLocal() as session:
+        user = await session.scalar(select(User).where(User.telegram_id == message.from_user.id))
+        if user:
+            user.phone_number = message.contact.phone_number
+            await session.commit()
+
+    data = await state.get_data()
+    start_arg = data.get("start_arg")
+    await state.clear()
+    await message.answer(t("onboarding_phone_saved"), reply_markup=ReplyKeyboardRemove())
+
+    refreshed_user = await _get_or_create_user(message)
+    await _try_link_deep_appointment(message, refreshed_user, start_arg, t)
+    await start(message, state, t)
+
+
+@router.message(OnboardingState.waiting_contact)
+async def contact_required(message: Message, t):
+    await message.answer(t("onboarding_phone_invalid"), reply_markup=_phone_request_kb())
+
+
 @router.message(Command("services"))
 async def show_services(message: Message) -> None:
+    if not await _require_phone_by_tg_id(message.from_user.id):
+        await message.answer("Сначала пройдите онбординг через /start.")
+        return
     async with SessionLocal() as session:
         services = (await session.scalars(select(Service).order_by(Service.name.asc()))).all()
     if not services:
@@ -162,6 +268,9 @@ async def show_services(message: Message) -> None:
 
 @router.callback_query(F.data.startswith("service:"))
 async def pick_service(callback: CallbackQuery, state: FSMContext) -> None:
+    if not await _require_phone_by_tg_id(callback.from_user.id):
+        await callback.answer("Сначала отправьте телефон через /start", show_alert=True)
+        return
     service_id = int(callback.data.split(":")[1])
     await state.update_data(service_id=service_id)
     await callback.message.edit_text("Select a date:", reply_markup=dates_keyboard())
@@ -205,6 +314,9 @@ async def pick_time(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("confirm:")) # Исправлено: теперь бот знает, что ловить
 async def confirm_booking(callback: CallbackQuery) -> None:
+    if not await _require_phone_by_tg_id(callback.from_user.id):
+        await callback.answer("Сначала отправьте телефон через /start", show_alert=True)
+        return
     _, service_id_raw, dt_iso = callback.data.split(":", maxsplit=2)
     service_id = int(service_id_raw)
     appointment_dt = datetime.fromisoformat(dt_iso).astimezone(settings.tz)

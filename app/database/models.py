@@ -9,6 +9,7 @@ class Base(DeclarativeBase):
     pass
 
 class UserRole(StrEnum):
+    SUPER_ADMIN = "super_admin"
     ADMIN = "admin"
     CLIENT = "client"
 
@@ -26,6 +27,7 @@ class User(Base):
     telegram_id: Mapped[Optional[int]] = mapped_column(BigInteger, unique=True, index=True, nullable=True)
     
     role: Mapped[UserRole] = mapped_column(Enum(UserRole), default=UserRole.CLIENT)
+    language_code: Mapped[str] = mapped_column(String(5), default="ru")
     full_name: Mapped[str] = mapped_column(String(255))
     phone_number: Mapped[str | None] = mapped_column(String(32), nullable=True)
     
@@ -80,6 +82,8 @@ class Appointment(Base):
         ForeignKey("users.id", ondelete="CASCADE"), 
         nullable=True
     )
+    manual_client_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    manual_client_phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
     custom_client_data: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     service_id: Mapped[int] = mapped_column(ForeignKey("services.id", ondelete="CASCADE"))
     datetime: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)

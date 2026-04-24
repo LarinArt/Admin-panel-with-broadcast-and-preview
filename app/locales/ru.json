@@ -1,0 +1,13 @@
+{
+  "onboarding_share_phone": "Для продолжения отправьте номер телефона через кнопку ниже.",
+  "onboarding_phone_saved": "Спасибо! Телефон сохранен.",
+  "onboarding_phone_invalid": "Пожалуйста, используйте кнопку «Поделиться контактом».",
+  "start_client_welcome": "Добро пожаловать в {org_name}! Выберите услугу для записи.",
+  "start_admin_welcome": "Вы администратор {org_name}. Откройте панель управления.",
+  "start_create_business": "Система готова к работе! Создайте бизнес для начала.",
+  "start_link_success": "Запись успешно привязана к вашему Telegram.",
+  "start_link_already": "Эта запись уже привязана к другому пользователю.",
+  "start_link_not_found": "Запись по ссылке не найдена.",
+  "lang_choose": "Выберите язык / Оберіть мову / Choose language",
+  "lang_saved": "Язык сохранен."
+}

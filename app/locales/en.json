@@ -1,0 +1,13 @@
+{
+  "onboarding_share_phone": "To continue, please share your phone number using the button below.",
+  "onboarding_phone_saved": "Thanks! Your phone number has been saved.",
+  "onboarding_phone_invalid": "Please use the \"Share contact\" button.",
+  "start_client_welcome": "Welcome to {org_name}! Choose a service to book.",
+  "start_admin_welcome": "You are an admin of {org_name}. Open the admin panel.",
+  "start_create_business": "System is ready! Create your business to begin.",
+  "start_link_success": "Appointment has been linked to your Telegram account.",
+  "start_link_already": "This appointment is already linked to another user.",
+  "start_link_not_found": "Appointment from this link was not found.",
+  "lang_choose": "Выберите язык / Оберіть мову / Choose language",
+  "lang_saved": "Language saved."
+}

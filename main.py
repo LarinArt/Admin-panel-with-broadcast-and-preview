@@ -11,6 +11,7 @@ if BASE_DIR not in sys.path:
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
+from app.bot.i18n import I18nMiddleware
 from app.database.engine import init_models
 from app.config import get_settings
 from app.services.scheduler import build_scheduler
@@ -35,6 +36,7 @@ async def main() -> None:
     # 2. Настраиваем бота и диспетчер
     bot = Bot(token=settings.bot_token)
     dp = Dispatcher(storage=MemoryStorage())
+    dp.update.middleware(I18nMiddleware())
 
     # 3. Регистрируем роутеры
     dp.include_router(admin_router)

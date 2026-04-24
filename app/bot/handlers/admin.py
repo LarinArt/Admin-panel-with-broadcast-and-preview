@@ -10,11 +10,14 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils.deep_linking import create_start_link
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from sqlalchemy import select, func, update
+from sqlalchemy import select, func, update, and_
 from sqlalchemy.orm import selectinload
+from zoneinfo import ZoneInfo
+from app.config import get_settings
 from app.database.engine import SessionLocal
-from app.database.models import Appointment, Service, User, Organization, Master, AppointmentStatus
+from app.database.models import Appointment, Service, User, Organization, Master, AppointmentStatus, UserRole
 from app.services.working_hours import get_working_hours
 
 # Универсальный словарь для адаптации под разные ниши
@@ -130,6 +133,8 @@ def build_admin_booking_calendar(master_id: int, service_id: int, year: int, mon
 
 router = Router(name="admin")
 logger = logging.getLogger(__name__)
+settings = get_settings()
+TZ = ZoneInfo(settings.timezone)
 
 # --- СОСТОЯНИЯ (FSM) ---
 class ServiceAddState(StatesGroup):
@@ -153,6 +158,11 @@ class AdminAppointmentState(StatesGroup):
     date = State()
     time = State()
     client_name = State()
+    client_phone = State()
+
+
+class AddAdminState(StatesGroup):
+    telegram_id = State()
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (UI) ---
 
@@ -179,6 +189,10 @@ async def get_user_org(session, tg_id):
     if not user: return None
     return await session.scalar(select(Organization).where(Organization.owner_id == user.id))
 
+
+async def get_user_by_tg(session, tg_id: int) -> User | None:
+    return await session.scalar(select(User).where(User.telegram_id == tg_id))
+
 # --- ГЛАВНОЕ МЕНЮ ---
 
 @router.callback_query(F.data == "admin_panel")
@@ -187,6 +201,9 @@ async def show_admin_menu(event: CallbackQuery | Message, state: FSMContext):
     
     async with SessionLocal() as session:
         user_id = event.from_user.id
+        db_user = await get_user_by_tg(session, user_id)
+        if not db_user or db_user.role not in (UserRole.ADMIN, UserRole.SUPER_ADMIN):
+            return await event.answer("Недостаточно прав.")
         org = await get_user_org(session, user_id)
         
         if not org:
@@ -212,15 +229,21 @@ async def show_admin_menu(event: CallbackQuery | Message, state: FSMContext):
             f"Настройте ваш бизнес ниже.")
     
     builder = InlineKeyboardBuilder()
-    # Кнопки теперь берут названия из theme (Мастер/Бокс, Работа и т.д.)
-    builder.button(text=f"➕ {theme['service']}", callback_data="add_service")
-    builder.button(text=f"➕ {theme['master']}", callback_data="add_master")
-    builder.button(text="📂 Управление", callback_data="view_lists")
-    builder.button(text="📅 График", callback_data="view_appointments")
-    builder.button(text="📝 Записать клиента", callback_data="admin_manual_start")
-    builder.button(text="📢 Рассылка", callback_data="admin_broadcast") # Новая кнопка
-    builder.button(text="📊 Статистика", callback_data="view_stats")
-    builder.adjust(2, 1, 2, 1) # Подправь разметку (добавили 1 кнопку в новый ряд)
+    # Для обычного админа оставляем только ручную запись и рассылку.
+    if db_user.role == UserRole.ADMIN:
+        builder.button(text="📝 Записать клиента", callback_data="admin_manual_start")
+        builder.button(text="📢 Рассылка", callback_data="admin_broadcast")
+        builder.adjust(1)
+    else:
+        builder.button(text=f"➕ {theme['service']}", callback_data="add_service")
+        builder.button(text=f"➕ {theme['master']}", callback_data="add_master")
+        builder.button(text="📂 Управление", callback_data="view_lists")
+        builder.button(text="📅 График", callback_data="view_appointments")
+        builder.button(text="📝 Записать клиента", callback_data="admin_manual_start")
+        builder.button(text="📢 Рассылка", callback_data="admin_broadcast")
+        builder.button(text="📊 Статистика", callback_data="view_stats:today")
+        builder.button(text="➕ Админа", callback_data="add_admin_start")
+        builder.adjust(2, 1, 2, 2, 1)
 
     if isinstance(event, CallbackQuery):
         await event.message.edit_text(text, reply_markup=builder.as_markup())
@@ -289,31 +312,66 @@ async def show_master_calendar(callback: CallbackQuery):
 
 # --- БЛОК: СТАТИСТИКА ---
 
-@router.callback_query(F.data == "view_stats")
+def _stats_period_bounds(period: str) -> tuple[datetime, datetime, str]:
+    now = datetime.now(TZ)
+    if period == "week":
+        start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        return start, now, "Эта неделя"
+    if period == "month":
+        start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        return start, now, "Этот месяц"
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return start, now, "Сегодня"
+
+
+@router.callback_query(F.data.startswith("view_stats"))
 async def view_stats(callback: CallbackQuery):
+    period = "today"
+    if ":" in callback.data:
+        period = callback.data.split(":")[1]
+
+    start_dt, end_dt, title = _stats_period_bounds(period)
     async with SessionLocal() as session:
+        current_user = await get_user_by_tg(session, callback.from_user.id)
+        if not current_user or current_user.role != UserRole.SUPER_ADMIN:
+            return await callback.answer("Статистика доступна только SUPER_ADMIN.", show_alert=True)
         org = await get_user_org(session, callback.from_user.id)
         if not org: return await callback.answer("Организация не найдена")
         
-        total_appts = await session.scalar(select(func.count(Appointment.id)).join(Service).where(Service.organization_id == org.id)) or 0
-        total_revenue = await session.scalar(select(func.sum(Service.price)).join(Appointment).where(Service.organization_id == org.id)) or 0
+        base_filters = and_(
+            Service.organization_id == org.id,
+            Appointment.datetime >= start_dt,
+            Appointment.datetime <= end_dt,
+            Appointment.status == AppointmentStatus.CONFIRMED,
+        )
+        total_appts = await session.scalar(
+            select(func.count(Appointment.id)).join(Service).where(base_filters)
+        ) or 0
+        total_revenue = await session.scalar(
+            select(func.sum(Service.price)).join(Appointment).where(base_filters)
+        ) or 0
         
         top_query = await session.execute(
             select(Service.name, func.count(Appointment.id))
-            .join(Appointment).where(Service.organization_id == org.id)
+            .join(Appointment).where(base_filters)
             .group_by(Service.name).order_by(func.count(Appointment.id).desc()).limit(1)
         )
         pop = top_query.first()
         pop_name = pop[0] if pop else "Нет записей"
 
     stats_text = (
-        f"📊 **Аналитика: {org.name}**\n━━━━━━━━━━━━━━\n"
+        f"📊 **Аналитика: {org.name} ({title})**\n━━━━━━━━━━━━━━\n"
         f"📅 Всего записей: {total_appts}\n"
         f"💰 Оборот: {total_revenue} грн\n"
         f"🏆 Топ услуг: {pop_name}"
     )
     
-    builder = InlineKeyboardBuilder().button(text="⬅️ Назад", callback_data="admin_panel")
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Сегодня", callback_data="view_stats:today")
+    builder.button(text="Неделя", callback_data="view_stats:week")
+    builder.button(text="Месяц", callback_data="view_stats:month")
+    builder.button(text="⬅️ Назад", callback_data="admin_panel")
+    builder.adjust(3, 1)
     await callback.message.edit_text(stats_text, reply_markup=builder.as_markup())
 
 # --- БЛОК: ДОБАВЛЕНИЕ МАСТЕРА ---
@@ -324,6 +382,40 @@ async def start_add_master(callback: CallbackQuery, state: FSMContext):
     builder = InlineKeyboardBuilder().button(text="❌ Отмена", callback_data="admin_panel")
     await callback.message.edit_text("👤 **Шаг 1:** Введите имя мастера:", reply_markup=builder.as_markup())
     await callback.answer()
+
+
+@router.callback_query(F.data == "add_admin_start")
+async def add_admin_start(callback: CallbackQuery, state: FSMContext):
+    async with SessionLocal() as session:
+        current_user = await get_user_by_tg(session, callback.from_user.id)
+        if not current_user or current_user.role != UserRole.SUPER_ADMIN:
+            return await callback.answer("Только SUPER_ADMIN может выдавать права.", show_alert=True)
+    await state.set_state(AddAdminState.telegram_id)
+    await callback.message.edit_text("Введите Telegram ID пользователя, которому нужно выдать роль ADMIN:")
+    await callback.answer()
+
+
+@router.message(AddAdminState.telegram_id)
+async def add_admin_finish(message: Message, state: FSMContext):
+    tg_id_raw = (message.text or "").strip()
+    if not tg_id_raw.isdigit():
+        return await message.answer("Неверный формат ID. Введите число.")
+
+    async with SessionLocal() as session:
+        current_user = await get_user_by_tg(session, message.from_user.id)
+        if not current_user or current_user.role != UserRole.SUPER_ADMIN:
+            await state.clear()
+            return await message.answer("Недостаточно прав.")
+
+        target_user = await get_user_by_tg(session, int(tg_id_raw))
+        if not target_user:
+            return await message.answer("Пользователь не найден в базе. Он должен сначала написать /start.")
+
+        target_user.role = UserRole.ADMIN
+        await session.commit()
+
+    await state.clear()
+    await message.answer(f"Готово. Пользователю {tg_id_raw} выдана роль ADMIN.")
 
 @router.message(MasterAddState.name)
 async def process_master_name(message: Message, state: FSMContext):
@@ -691,8 +783,15 @@ async def view_appointments(callback: CallbackQuery):
 
     text = "📅 **Список записей:**\n\n"
     for appt in appointments:
-        client_label = appt.client.full_name if appt.client else (appt.custom_client_data or "Клиент")
-        text += f"👤 {client_label}\n🔹 {appt.service.name}\n⏰ {appt.datetime.strftime('%d.%m %H:%M')}\n━━━━━━━━━━━━━━\n"
+        client_label = appt.client.full_name if appt.client else (appt.manual_client_name or appt.custom_client_data or "Клиент")
+        client_phone = appt.client.phone_number if appt.client else (appt.manual_client_phone or "—")
+        text += (
+            f"👤 {client_label}\n"
+            f"📞 {client_phone}\n"
+            f"🔹 {appt.service.name}\n"
+            f"⏰ {appt.datetime.strftime('%d.%m %H:%M')}\n"
+            f"━━━━━━━━━━━━━━\n"
+        )
     
     await callback.message.edit_text(text, reply_markup=builder.as_markup())
 
@@ -743,8 +842,9 @@ async def show_day_details(callback: CallbackQuery):
             print(f"Зона: {appt.datetime.tzinfo}")
             print(f"-------------")
             time_str = appt.datetime.strftime('%H:%M')
-            client_name = appt.client.full_name if appt.client else (appt.custom_client_data or "Клиент")
-            text += f"⏰ {time_str} — {client_name}\n🔹 {appt.service.name}\n\n"
+            client_name = appt.client.full_name if appt.client else (appt.manual_client_name or appt.custom_client_data or "Клиент")
+            client_phone = appt.client.phone_number if appt.client else (appt.manual_client_phone or "—")
+            text += f"⏰ {time_str} — {client_name}\n📞 {client_phone}\n🔹 {appt.service.name}\n\n"
         
         await callback.message.edit_text(text, reply_markup=builder.as_markup())
     
@@ -752,6 +852,10 @@ async def show_day_details(callback: CallbackQuery):
 
 @router.callback_query(F.data == "admin_broadcast")
 async def start_broadcast(callback: CallbackQuery, state: FSMContext):
+    async with SessionLocal() as session:
+        current_user = await get_user_by_tg(session, callback.from_user.id)
+        if not current_user or current_user.role not in (UserRole.ADMIN, UserRole.SUPER_ADMIN):
+            return await callback.answer("Недостаточно прав.", show_alert=True)
     await callback.message.answer("Введите текст рассылки (можно добавить фото):")
     await state.set_state(BroadcastStates.waiting_for_message)
     await callback.answer()
@@ -831,6 +935,9 @@ async def cancel_broadcast(callback: CallbackQuery, state: FSMContext):
 async def admin_record_start(callback: CallbackQuery, state: FSMContext):
     """Шаг 1: выбор мастера для ручной записи."""
     async with SessionLocal() as session:
+        current_user = await get_user_by_tg(session, callback.from_user.id)
+        if not current_user or current_user.role not in (UserRole.ADMIN, UserRole.SUPER_ADMIN):
+            return await callback.answer("Недостаточно прав.", show_alert=True)
         org = await get_user_org(session, callback.from_user.id)
         if not org:
             return await callback.answer("Организация не найдена.", show_alert=True)
@@ -980,20 +1087,30 @@ async def admin_record_time(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(AdminAppointmentState.time, F.data.startswith("adm_book_time_"))
 async def admin_record_name(callback: CallbackQuery, state: FSMContext):
-    """Шаг 5: ввод данных клиента."""
+    """Шаг 5: ввод имени клиента."""
     time_val = callback.data.replace("adm_book_time_", "", 1)
     await state.update_data(time=time_val)
 
-    await callback.message.edit_text("📝 **Шаг 5:** Введите имя клиента и/или телефон:")
+    await callback.message.edit_text("📝 **Шаг 5:** Введите имя клиента:")
     await state.set_state(AdminAppointmentState.client_name)
     await callback.answer()
 
 @router.message(AdminAppointmentState.client_name)
+async def admin_record_phone(message: Message, state: FSMContext):
+    client_name = (message.text or "").strip()
+    if not client_name:
+        return await message.answer("Имя клиента не может быть пустым.")
+    await state.update_data(client_name=client_name)
+    await state.set_state(AdminAppointmentState.client_phone)
+    await message.answer("📞 **Шаг 6:** Введите номер телефона клиента:")
+
+
+@router.message(AdminAppointmentState.client_phone)
 async def admin_record_finish(message: Message, state: FSMContext):
     """Сохранение ручной записи в БД."""
-    client_info = (message.text or "").strip()
-    if not client_info:
-        return await message.answer("Введите имя или телефон клиента текстом.")
+    client_phone = (message.text or "").strip()
+    if not client_phone:
+        return await message.answer("Введите номер телефона клиента.")
 
     data = await state.get_data()
 
@@ -1026,20 +1143,27 @@ async def admin_record_finish(message: Message, state: FSMContext):
 
         new_appt = Appointment(
             client_id=None,
-            custom_client_data=client_info,
+            manual_client_name=data.get("client_name"),
+            manual_client_phone=client_phone,
+            custom_client_data=f"{data.get('client_name', '')} | {client_phone}",
             master_id=int(data["master_id"]),
             service_id=int(data["service_id"]),
             organization_id=org.id,
-            datetime=appt_datetime,
+            datetime=appt_datetime.replace(tzinfo=TZ),
             status=AppointmentStatus.CONFIRMED,
         )
         session.add(new_appt)
         await session.commit()
+        await session.refresh(new_appt)
+
+    deep_link = await create_start_link(message.bot, payload=f"book_{new_appt.id}", encode=False)
 
     await message.answer(
         f"✅ **Запись успешно создана!**\n\n"
-        f"👤 **Клиент:** {client_info}\n"
-        f"📅 **Дата и время:** {appt_datetime.strftime('%d.%m.%Y %H:%M')}"
+        f"👤 **Клиент:** {data.get('client_name')}\n"
+        f"📞 **Телефон:** {client_phone}\n"
+        f"📅 **Дата и время:** {appt_datetime.strftime('%d.%m.%Y %H:%M')}\n\n"
+        f"🔗 **Ссылка для привязки Telegram:**\n{deep_link}"
     )
     await state.clear()
     await show_admin_menu(message, state)
