@@ -5,7 +5,7 @@ import asyncio
 
 
 from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest, TelegramRetryAfter
-from datetime import datetime
+from datetime import datetime, timedelta, date
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -14,7 +14,8 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select, func, update
 from sqlalchemy.orm import selectinload
 from app.database.engine import SessionLocal
-from app.database.models import Appointment, Service, User, Organization, Master
+from app.database.models import Appointment, Service, User, Organization, Master, AppointmentStatus
+from app.services.working_hours import get_working_hours
 
 # Универсальный словарь для адаптации под разные ниши
 BUSINESS_THEMES = {
@@ -56,6 +57,77 @@ BUSINESS_THEMES = {
     }
 }
 
+def _iter_hour_slots_for_date(target_date: date) -> list[str]:
+    """Генерирует слоты с шагом 1 час на основе рабочих часов дня."""
+    start_time, end_time = get_working_hours(target_date.weekday())
+    start_dt = datetime.combine(target_date, start_time)
+    end_dt = datetime.combine(target_date, end_time)
+
+    slots: list[str] = []
+    current = start_dt
+    while current < end_dt:
+        slots.append(current.strftime("%H:%M"))
+        current += timedelta(hours=1)
+    return slots
+
+
+async def get_free_slots(session, master_id: int, target_date: date) -> list[str]:
+    """Возвращает свободные слоты мастера на дату (кроме отмененных записей)."""
+    result = await session.execute(
+        select(Appointment.datetime).where(
+            Appointment.master_id == master_id,
+            func.date(Appointment.datetime) == target_date,
+            Appointment.status != AppointmentStatus.CANCELLED,
+        )
+    )
+    booked_times = {dt_value.strftime("%H:%M") for dt_value, in result.all()}
+    all_slots = _iter_hour_slots_for_date(target_date)
+    return [slot for slot in all_slots if slot not in booked_times]
+
+
+def build_admin_booking_calendar(master_id: int, service_id: int, year: int, month: int) -> InlineKeyboardMarkup:
+    """Календарь-сетка для ручной записи администратора."""
+    builder = InlineKeyboardBuilder()
+    today = datetime.now().date()
+
+    month_title = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+                   "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"][month - 1]
+    builder.row(
+        InlineKeyboardButton(
+            text=f"⬅️",
+            callback_data=f"adm_book_nav_{master_id}_{service_id}_{year}_{month}_prev",
+        ),
+        InlineKeyboardButton(text=f"{month_title} {year}", callback_data="adm_book_ignore"),
+        InlineKeyboardButton(
+            text=f"➡️",
+            callback_data=f"adm_book_nav_{master_id}_{service_id}_{year}_{month}_next",
+        ),
+    )
+
+    for day_name in ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]:
+        builder.button(text=day_name, callback_data="adm_book_ignore")
+
+    month_matrix = calendar.monthcalendar(year, month)
+    for week in month_matrix:
+        for day in week:
+            if day == 0:
+                builder.button(text=" ", callback_data="adm_book_ignore")
+                continue
+
+            day_date = date(year, month, day)
+            if day_date < today:
+                builder.button(text=f"·{day}", callback_data="adm_book_ignore")
+            else:
+                builder.button(
+                    text=str(day),
+                    callback_data=f"adm_book_day_{day_date.isoformat()}",
+                )
+
+    builder.adjust(7, *([7] * len(month_matrix)))
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="admin_panel"))
+    return builder.as_markup()
+
+
 router = Router(name="admin")
 logger = logging.getLogger(__name__)
 
@@ -75,18 +147,30 @@ class BroadcastStates(StatesGroup):
     waiting_for_message = State()
     confirm_broadcast = State()  
 
+class AdminAppointmentState(StatesGroup):
+    master_id = State()
+    service_id = State()
+    date = State()
+    time = State()
+    client_name = State()
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (UI) ---
 
 def get_admin_main_kb() -> InlineKeyboardMarkup:
     """Главная клавиатура админ-панели"""
     builder = InlineKeyboardBuilder()
+    
+    # Добавляем новую кнопку для ручной записи клиента
+    builder.button(text="📝 Записать клиента", callback_data="admin_manual_start")
+    
     builder.button(text="➕ Услугу", callback_data="add_service")
     builder.button(text="➕👤 Мастера", callback_data="add_master")
     builder.button(text="📂 Управление", callback_data="view_lists")
-    builder.button(text="📅 Записи", callback_data="view_appointments")
+    builder.button(text="📅 График", callback_data="view_appointments")
     builder.button(text="📊 Статистика", callback_data="view_stats")
-    builder.adjust(2, 1, 2) 
+    
+    # Настраиваем сетку: Новая запись (1), Добавить (2), Управление (1), График/Стата (2)
+    builder.adjust(1, 2, 1, 2) 
     return builder.as_markup()
 
 async def get_user_org(session, tg_id):
@@ -133,6 +217,7 @@ async def show_admin_menu(event: CallbackQuery | Message, state: FSMContext):
     builder.button(text=f"➕ {theme['master']}", callback_data="add_master")
     builder.button(text="📂 Управление", callback_data="view_lists")
     builder.button(text="📅 График", callback_data="view_appointments")
+    builder.button(text="📝 Записать клиента", callback_data="admin_manual_start")
     builder.button(text="📢 Рассылка", callback_data="admin_broadcast") # Новая кнопка
     builder.button(text="📊 Статистика", callback_data="view_stats")
     builder.adjust(2, 1, 2, 1) # Подправь разметку (добавили 1 кнопку в новый ряд)
@@ -606,7 +691,8 @@ async def view_appointments(callback: CallbackQuery):
 
     text = "📅 **Список записей:**\n\n"
     for appt in appointments:
-        text += f"👤 {appt.client.full_name if appt.client else 'Клиент'}\n🔹 {appt.service.name}\n⏰ {appt.datetime.strftime('%d.%m %H:%M')}\n━━━━━━━━━━━━━━\n"
+        client_label = appt.client.full_name if appt.client else (appt.custom_client_data or "Клиент")
+        text += f"👤 {client_label}\n🔹 {appt.service.name}\n⏰ {appt.datetime.strftime('%d.%m %H:%M')}\n━━━━━━━━━━━━━━\n"
     
     await callback.message.edit_text(text, reply_markup=builder.as_markup())
 
@@ -657,7 +743,7 @@ async def show_day_details(callback: CallbackQuery):
             print(f"Зона: {appt.datetime.tzinfo}")
             print(f"-------------")
             time_str = appt.datetime.strftime('%H:%M')
-            client_name = appt.client.full_name if appt.client else "Клиент"
+            client_name = appt.client.full_name if appt.client else (appt.custom_client_data or "Клиент")
             text += f"⏰ {time_str} — {client_name}\n🔹 {appt.service.name}\n\n"
         
         await callback.message.edit_text(text, reply_markup=builder.as_markup())
@@ -738,3 +824,222 @@ async def final_send_broadcast(callback: CallbackQuery, state: FSMContext):
 async def cancel_broadcast(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.edit_text("❌ Рассылка отменена.")
+
+# --- БЛОК: РУЧНАЯ ЗАПИСЬ АДМИНОМ ---
+
+@router.callback_query(F.data == "admin_manual_start")
+async def admin_record_start(callback: CallbackQuery, state: FSMContext):
+    """Шаг 1: выбор мастера для ручной записи."""
+    async with SessionLocal() as session:
+        org = await get_user_org(session, callback.from_user.id)
+        if not org:
+            return await callback.answer("Организация не найдена.", show_alert=True)
+
+        masters = (await session.scalars(select(Master).where(Master.organization_id == org.id))).all()
+
+    if not masters:
+        return await callback.answer("Сначала добавьте мастеров!", show_alert=True)
+
+    builder = InlineKeyboardBuilder()
+    for m in masters:
+        builder.button(text=f"👤 {m.name}", callback_data=f"adm_book_master_{m.id}")
+    builder.adjust(1)
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="admin_panel"))
+
+    await callback.message.edit_text("🎯 **Шаг 1:** Выберите мастера для записи:", reply_markup=builder.as_markup())
+    await state.set_state(AdminAppointmentState.master_id)
+    await callback.answer()
+
+@router.callback_query(AdminAppointmentState.master_id, F.data.startswith("adm_book_master_"))
+async def admin_record_service(callback: CallbackQuery, state: FSMContext):
+    """Шаг 2: выбор услуги."""
+    master_id = int(callback.data.split("_")[-1])
+    await state.update_data(master_id=master_id)
+
+    async with SessionLocal() as session:
+        org = await get_user_org(session, callback.from_user.id)
+        if not org:
+            return await callback.answer("Организация не найдена.", show_alert=True)
+        services = (await session.scalars(select(Service).where(Service.organization_id == org.id))).all()
+
+    if not services:
+        return await callback.answer("Сначала добавьте услуги!", show_alert=True)
+
+    builder = InlineKeyboardBuilder()
+    for s in services:
+        builder.button(text=f"🔹 {s.name} ({s.price}грн)", callback_data=f"adm_book_service_{s.id}")
+    builder.adjust(1)
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="admin_panel"))
+
+    await callback.message.edit_text("💅 **Шаг 2:** Выберите услугу:", reply_markup=builder.as_markup())
+    await state.set_state(AdminAppointmentState.service_id)
+    await callback.answer()
+
+@router.callback_query(AdminAppointmentState.service_id, F.data.startswith("adm_book_service_"))
+async def admin_record_calendar(callback: CallbackQuery, state: FSMContext):
+    """Шаг 3: выбор даты в календаре-сетке."""
+    service_id = int(callback.data.split("_")[-1])
+    state_data = await state.get_data()
+    master_id = state_data.get("master_id")
+    if not master_id:
+        await state.clear()
+        return await callback.answer("Сессия устарела. Начните заново.", show_alert=True)
+
+    await state.update_data(service_id=service_id)
+    now = datetime.now()
+    calendar_kb = build_admin_booking_calendar(master_id=master_id, service_id=service_id, year=now.year, month=now.month)
+    await callback.message.edit_text("📅 **Шаг 3:** Выберите дату:", reply_markup=calendar_kb)
+    await state.set_state(AdminAppointmentState.date)
+    await callback.answer()
+
+@router.callback_query(AdminAppointmentState.date, F.data == "adm_book_ignore")
+async def ignore_booking_calendar(callback: CallbackQuery):
+    await callback.answer()
+
+@router.callback_query(AdminAppointmentState.date, F.data.startswith("adm_book_nav_"))
+async def admin_record_calendar_nav(callback: CallbackQuery, state: FSMContext):
+    """Навигация по месяцам в календаре ручной записи."""
+    parts = callback.data.split("_")
+    if len(parts) < 8:
+        return await callback.answer("Некорректные данные календаря.", show_alert=True)
+
+    master_id = int(parts[3])
+    service_id = int(parts[4])
+    year = int(parts[5])
+    month = int(parts[6])
+    direction = parts[7]
+
+    shift = -1 if direction == "prev" else 1
+    new_month = month + shift
+    new_year = year
+    if new_month == 0:
+        new_month = 12
+        new_year -= 1
+    elif new_month == 13:
+        new_month = 1
+        new_year += 1
+
+    today = datetime.now().date()
+    if date(new_year, new_month, 1) < date(today.year, today.month, 1):
+        return await callback.answer("Нельзя выбрать прошедший месяц.", show_alert=True)
+
+    await state.update_data(master_id=master_id, service_id=service_id)
+    calendar_kb = build_admin_booking_calendar(
+        master_id=master_id,
+        service_id=service_id,
+        year=new_year,
+        month=new_month,
+    )
+    await callback.message.edit_reply_markup(reply_markup=calendar_kb)
+    await callback.answer()
+
+@router.callback_query(AdminAppointmentState.date, F.data.startswith("adm_book_day_"))
+async def admin_record_time(callback: CallbackQuery, state: FSMContext):
+    """Шаг 4: выбор свободного времени."""
+    selected_date_str = callback.data.replace("adm_book_day_", "", 1)
+    try:
+        selected_date = datetime.strptime(selected_date_str, "%Y-%m-%d").date()
+    except ValueError:
+        return await callback.answer("Некорректная дата.", show_alert=True)
+
+    fsm_data = await state.get_data()
+    master_id = fsm_data.get("master_id")
+    if not master_id:
+        await state.clear()
+        return await callback.answer("Сессия устарела. Начните заново.", show_alert=True)
+
+    async with SessionLocal() as session:
+        free_slots = await get_free_slots(session=session, master_id=int(master_id), target_date=selected_date)
+
+    await state.update_data(date=selected_date.isoformat())
+    builder = InlineKeyboardBuilder()
+    for slot in free_slots:
+        builder.button(text=slot, callback_data=f"adm_book_time_{slot}")
+    if free_slots:
+        builder.adjust(4)
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="admin_panel"))
+
+    if not free_slots:
+        await callback.message.edit_text(
+            f"⏰ На дату **{selected_date.strftime('%d.%m.%Y')}** свободных слотов нет.\n"
+            f"Выберите другую дату через кнопку ниже.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="↩️ К выбору даты", callback_data=f"adm_book_service_{fsm_data['service_id']}")]]
+            ),
+        )
+        await state.set_state(AdminAppointmentState.service_id)
+        await callback.answer()
+        return
+
+    await callback.message.edit_text(
+        f"⏰ **Шаг 4:** Дата **{selected_date.strftime('%d.%m.%Y')}**. Выберите время:",
+        reply_markup=builder.as_markup(),
+    )
+    await state.set_state(AdminAppointmentState.time)
+    await callback.answer()
+
+@router.callback_query(AdminAppointmentState.time, F.data.startswith("adm_book_time_"))
+async def admin_record_name(callback: CallbackQuery, state: FSMContext):
+    """Шаг 5: ввод данных клиента."""
+    time_val = callback.data.replace("adm_book_time_", "", 1)
+    await state.update_data(time=time_val)
+
+    await callback.message.edit_text("📝 **Шаг 5:** Введите имя клиента и/или телефон:")
+    await state.set_state(AdminAppointmentState.client_name)
+    await callback.answer()
+
+@router.message(AdminAppointmentState.client_name)
+async def admin_record_finish(message: Message, state: FSMContext):
+    """Сохранение ручной записи в БД."""
+    client_info = (message.text or "").strip()
+    if not client_info:
+        return await message.answer("Введите имя или телефон клиента текстом.")
+
+    data = await state.get_data()
+
+    time_val = str(data.get("time", "")).strip()
+    if ":" not in time_val:
+        time_val = f"{time_val}:00"
+    elif len(time_val.split(":")) == 1:
+        time_val = f"{time_val}:00"
+
+    dt_str = f"{data.get('date')} {time_val}"
+    try:
+        appt_datetime = datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
+    except ValueError:
+        await message.answer("❌ Ошибка в формате даты или времени. Попробуйте начать заново.")
+        await state.clear()
+        return
+
+    async with SessionLocal() as session:
+        org = await get_user_org(session, message.from_user.id)
+        if not org:
+            await message.answer("❌ Ошибка: организация не найдена.")
+            await state.clear()
+            return
+
+        free_slots = await get_free_slots(session=session, master_id=int(data["master_id"]), target_date=appt_datetime.date())
+        if appt_datetime.strftime("%H:%M") not in free_slots:
+            await message.answer("❌ Этот слот уже занят. Начните запись заново и выберите другое время.")
+            await state.clear()
+            return
+
+        new_appt = Appointment(
+            client_id=None,
+            custom_client_data=client_info,
+            master_id=int(data["master_id"]),
+            service_id=int(data["service_id"]),
+            organization_id=org.id,
+            datetime=appt_datetime,
+            status=AppointmentStatus.CONFIRMED,
+        )
+        session.add(new_appt)
+        await session.commit()
+
+    await message.answer(
+        f"✅ **Запись успешно создана!**\n\n"
+        f"👤 **Клиент:** {client_info}\n"
+        f"📅 **Дата и время:** {appt_datetime.strftime('%d.%m.%Y %H:%M')}"
+    )
+    await state.clear()
+    await show_admin_menu(message, state)

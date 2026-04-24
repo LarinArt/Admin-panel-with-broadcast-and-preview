@@ -40,7 +40,7 @@ async def _send_due_reminders(bot: Bot) -> None:
         appointments = (await session.scalars(stmt)).all()
 
         for appointment in appointments:
-            delta = appointment.datetime - now
+            delta = appointment.datetime.replace(tzinfo=None) - datetime.now().replace(tzinfo=None)
             hours_to_appt = delta.total_seconds() / 3600
 
             # Определяем, какое именно напоминание нужно отправить
