@@ -1,36 +1,52 @@
-version: "3.9"
-
 services:
   db:
     image: postgres:16
+    container_name: up_db
     environment:
-      POSTGRES_DB: crm
-      POSTGRES_USER: crm_user
-      POSTGRES_PASSWORD: crm_password
+      POSTGRES_DB: ${POSTGRES_DB:-saas_db}
+      POSTGRES_USER: ${POSTGRES_USER:-saas_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-saas_password}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U crm_user -d crm"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-saas_user} -d ${POSTGRES_DB:-saas_db}"]
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
-  bot:
+  api:
     build: .
+    container_name: up_api
     depends_on:
       db:
         condition: service_healthy
     environment:
-      BOT_TOKEN: ${BOT_TOKEN}
-      DATABASE_URL: postgresql+asyncpg://crm_user:crm_password@db:5432/crm
-      TIMEZONE: Europe/Kyiv
-      ADMIN_TELEGRAM_IDS: ${ADMIN_TELEGRAM_IDS}
-      WORK_START_HOUR: 9
-      WORK_END_HOUR: 18
-      SLOT_STEP_MINUTES: 30
-      SCHEDULER_POLL_SECONDS: 300
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-saas_user}:${POSTGRES_PASSWORD:-saas_password}@db:5432/${POSTGRES_DB:-saas_db}
+      APP_TIMEZONE: Europe/Kiev
+      WEBHOOK_BASE_URL: ${WEBHOOK_BASE_URL}
+      SUPER_ADMIN_TOKEN: ${SUPER_ADMIN_TOKEN}
+    command: uvicorn app.web.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  bot-worker:
+    build: .
+    container_name: up_bot_worker
+    depends_on:
+      db:
+        condition: service_healthy
+      api:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-saas_user}:${POSTGRES_PASSWORD:-saas_password}@db:5432/${POSTGRES_DB:-saas_db}
+      APP_TIMEZONE: Europe/Kiev
+      SCHEDULER_POLL_SECONDS: ${SCHEDULER_POLL_SECONDS:-60}
+      SUPER_ADMIN_TOKEN: ${SUPER_ADMIN_TOKEN}
+    command: python main.py
     restart: unless-stopped
 
 volumes:

@@ -4,21 +4,23 @@ from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from sqlalchemy import select
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.bot.keyboards.inline import (
     confirm_keyboard,
     dates_keyboard,
+    masters_keyboard,
     services_keyboard,
     time_slots_keyboard,
 )
 from app.config import get_settings
 from app.database.engine import SessionLocal
-from app.database.models import Appointment, AppointmentStatus, Service, User, UserRole, Organization
+from app.database.models import Appointment, AppointmentStatus, Holiday, Master, Organization, Service, Tenant, User, UserRole
 from app.services.booking import calculate_available_slots
 from app.bot.callbacks import AppointmentConfirm
+from app.bot.i18n import get_tenant_id_by_bot_id
 
 
 router = Router(name="client")
@@ -26,6 +28,12 @@ settings = get_settings()
 
 
 class BookingState(StatesGroup):
+    master_id = State()
+    service_id = State()
+    booking_date = State()
+
+class RescheduleState(StatesGroup):
+    appointment_id = State()
     service_id = State()
     booking_date = State()
 
@@ -47,7 +55,11 @@ def _phone_request_kb() -> ReplyKeyboardMarkup:
     )
 
 
-async def _get_or_create_user(message: Message, selected_lang: str | None = None) -> User:
+async def _get_or_create_user(
+    message: Message,
+    selected_lang: str | None = None,
+    tenant_id: int | None = None,
+) -> User:
     async with SessionLocal() as session:
         user = await session.scalar(select(User).where(User.telegram_id == message.from_user.id))
         if user:
@@ -57,6 +69,8 @@ async def _get_or_create_user(message: Message, selected_lang: str | None = None
                 user.role = UserRole.SUPER_ADMIN
             if selected_lang:
                 user.language_code = selected_lang
+            if tenant_id and user.tenant_id is None:
+                user.tenant_id = tenant_id
             await session.commit()
             return user
 
@@ -65,7 +79,8 @@ async def _get_or_create_user(message: Message, selected_lang: str | None = None
             telegram_id=message.from_user.id,
             full_name=message.from_user.full_name,
             role=role,
-            language_code=selected_lang or (message.from_user.language_code or "ru")[:2],
+            language_code=selected_lang or "uk",
+            tenant_id=tenant_id,
         )
         session.add(user)
         await session.commit()
@@ -73,7 +88,13 @@ async def _get_or_create_user(message: Message, selected_lang: str | None = None
         return user
 
 
-async def _try_link_deep_appointment(message: Message, user: User, start_arg: str | None, t) -> None:
+async def _try_link_deep_appointment(
+    message: Message,
+    user: User,
+    start_arg: str | None,
+    t,
+    tenant_id: int | None = None,
+) -> None:
     if not start_arg or not start_arg.startswith("book_"):
         return
     appointment_id_raw = start_arg.replace("book_", "", 1)
@@ -82,7 +103,10 @@ async def _try_link_deep_appointment(message: Message, user: User, start_arg: st
         return
 
     async with SessionLocal() as session:
-        appointment = await session.get(Appointment, int(appointment_id_raw))
+        stmt = select(Appointment).where(Appointment.id == int(appointment_id_raw))
+        if tenant_id is not None:
+            stmt = stmt.where(Appointment.tenant_id == tenant_id)
+        appointment = await session.scalar(stmt)
         if not appointment:
             await message.answer(t("start_link_not_found"))
             return
@@ -95,10 +119,32 @@ async def _try_link_deep_appointment(message: Message, user: User, start_arg: st
     await message.answer(t("start_link_success"))
 
 
-async def _require_phone_by_tg_id(tg_id: int) -> bool:
+async def _require_phone_by_tg_id(tg_id: int, tenant_id: int | None = None) -> bool:
     async with SessionLocal() as session:
-        user = await session.scalar(select(User).where(User.telegram_id == tg_id))
+        stmt = select(User).where(User.telegram_id == tg_id)
+        if tenant_id is not None:
+            stmt = stmt.where(User.tenant_id == tenant_id)
+        user = await session.scalar(stmt)
         return bool(user and user.phone_number)
+
+
+async def _notify_admins_about_cancellation(bot, tenant_id: int, text: str) -> None:
+    async with SessionLocal() as session:
+        admins = (
+            await session.scalars(
+                select(User.telegram_id).where(
+                    User.tenant_id == tenant_id,
+                    User.role.in_([UserRole.ADMIN, UserRole.SUPER_ADMIN]),
+                    User.telegram_id.is_not(None),
+                    User.is_active.is_(True),
+                )
+            )
+        ).all()
+    for tg_id in admins:
+        try:
+            await bot.send_message(chat_id=tg_id, text=text)
+        except Exception:
+            continue
 
 # 1. Начало регистрации — спрашиваем название
 @router.callback_query(F.data == "setup_business")
@@ -128,27 +174,44 @@ async def process_business_name(message: Message, state: FSMContext):
 
 # 3. Финал регистрации
 @router.callback_query(F.data.startswith("biz_cat:"))
-async def process_business_category(callback: CallbackQuery, state: FSMContext):
+async def process_business_category(callback: CallbackQuery, state: FSMContext, tenant_id: int | None = None):
     category = callback.data.split(":")[1]
     user_data = await state.get_data()
     biz_name = user_data.get("name")
+
+    resolved_tenant_id = tenant_id or await get_tenant_id_by_bot_id(callback.bot.id)
     
     async with SessionLocal() as session:
         # 1. Находим пользователя в БД
         user = await session.scalar(
             select(User).where(User.telegram_id == callback.from_user.id)
         )
+        if not user:
+            await callback.answer("Користувача не знайдено. Надішліть /start", show_alert=True)
+            return
+
+        if resolved_tenant_id is None:
+            default_tenant = await session.scalar(select(Tenant).order_by(Tenant.id.asc()).limit(1))
+            if default_tenant:
+                resolved_tenant_id = default_tenant.id
+
+        if resolved_tenant_id is None:
+            await callback.answer("Не знайдено tenant для цього бота.", show_alert=True)
+            return
         
         # 2. Создаем новую организацию
         new_org = Organization(
             name=biz_name,
             category=category,
-            owner_id=user.id
+            owner_id=user.id,
+            tenant_id=resolved_tenant_id,
         )
         session.add(new_org)
         
         # 3. Присваиваем пользователю роль администратора (теперь он босс!)
         user.role = UserRole.ADMIN
+        if user.tenant_id is None:
+            user.tenant_id = resolved_tenant_id
         
         await session.commit()
 
@@ -160,36 +223,15 @@ async def process_business_category(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-@router.message(Command("lang"))
-async def choose_lang(message: Message):
-    builder = InlineKeyboardBuilder()
-    builder.button(text="Українська", callback_data="lang:uk")
-    builder.button(text="Русский", callback_data="lang:ru")
-    builder.button(text="English", callback_data="lang:en")
-    builder.adjust(1)
-    await message.answer("Выберите язык / Оберіть мову / Choose language", reply_markup=builder.as_markup())
-
-
-@router.callback_query(F.data.startswith("lang:"))
-async def save_lang(callback: CallbackQuery):
-    lang = callback.data.split(":")[1]
-    async with SessionLocal() as session:
-        user = await session.scalar(select(User).where(User.telegram_id == callback.from_user.id))
-        if user:
-            user.language_code = lang
-            await session.commit()
-    await callback.answer("Сохранено")
-    await callback.message.answer("Язык сохранен.")
-
-
 @router.message(CommandStart())
-async def start(message: Message, state: FSMContext, t) -> None:
+async def start(message: Message, state: FSMContext, t, tenant_id: int | None = None) -> None:
     start_arg = None
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) > 1:
         start_arg = parts[1]
 
-    user = await _get_or_create_user(message)
+    resolved_tenant_id = tenant_id or await get_tenant_id_by_bot_id(message.bot.id)
+    user = await _get_or_create_user(message, tenant_id=resolved_tenant_id)
     is_root_admin = message.from_user.id in settings.admin_telegram_ids
 
     # Обязательный онбординг телефона только для обычного клиента.
@@ -199,11 +241,14 @@ async def start(message: Message, state: FSMContext, t) -> None:
         await message.answer(t("onboarding_share_phone"), reply_markup=_phone_request_kb())
         return
 
-    await _try_link_deep_appointment(message, user, start_arg, t)
+    await _try_link_deep_appointment(message, user, start_arg, t, tenant_id=resolved_tenant_id)
     
     async with SessionLocal() as session:
         # Ищем, создана ли уже организация для этого бота
-        existing_org = await session.scalar(select(Organization).limit(1))
+        stmt = select(Organization).limit(1)
+        if resolved_tenant_id is not None:
+            stmt = stmt.where(Organization.tenant_id == resolved_tenant_id)
+        existing_org = await session.scalar(stmt)
     
     builder = InlineKeyboardBuilder()
     
@@ -212,18 +257,133 @@ async def start(message: Message, state: FSMContext, t) -> None:
         # Для master-admin из .env даем доступ в админку независимо от состояния БД.
         if is_root_admin or user.role in (UserRole.ADMIN, UserRole.SUPER_ADMIN):
             welcome_text = t("start_admin_welcome", org_name=existing_org.name)
-            builder.button(text="📈 Управление платформой", callback_data="admin_panel")
+            builder.button(text="📈 Керування платформою", callback_data="admin_panel")
         else:
             welcome_text = t("start_client_welcome", org_name=existing_org.name)
-            builder.button(text="📅 Записаться на услугу", callback_data="show_services_list")
+            builder.button(text="📅 Записатися на послугу", callback_data="show_services_list")
+            builder.button(text="🗂 Мої записи", callback_data="client_my_appointments")
     
     # 2. Если организации еще нет (самый первый запуск бота)
     else:
         welcome_text = t("start_create_business")
-        builder.button(text="🏗 Создать свой бизнес", callback_data="setup_business")
+        builder.button(text="🏗 Створити свій бізнес", callback_data="setup_business")
 
     builder.adjust(1)
     await message.answer(welcome_text, reply_markup=builder.as_markup())
+
+
+@router.callback_query(F.data == "show_services_list")
+@router.callback_query(F.data == "client_back_services")
+async def show_services_inline(callback: CallbackQuery, state: FSMContext, tenant_id: int | None = None):
+    if tenant_id is None:
+        return await callback.answer("Tenant не визначено.", show_alert=True)
+    async with SessionLocal() as session:
+        masters = (
+            await session.scalars(
+                select(Master).where(Master.tenant_id == tenant_id).order_by(Master.name.asc())
+            )
+        ).all()
+    if not masters:
+        await callback.message.edit_text("Майстри ще не налаштовані.")
+        await callback.answer()
+        return
+    await state.set_state(BookingState.master_id)
+    await callback.message.edit_text("Оберіть майстра:", reply_markup=masters_keyboard(masters))
+    await callback.answer()
+
+
+@router.callback_query(BookingState.master_id, F.data.startswith("cl_master:"))
+async def pick_master(callback: CallbackQuery, state: FSMContext, tenant_id: int | None = None):
+    if tenant_id is None:
+        return await callback.answer("Tenant не визначено.", show_alert=True)
+    master_raw = callback.data.split(":", maxsplit=1)[1]
+    await state.update_data(master_id=master_raw)
+    async with SessionLocal() as session:
+        services = (
+            await session.scalars(
+                select(Service).where(Service.tenant_id == tenant_id).order_by(Service.name.asc())
+            )
+        ).all()
+    if not services:
+        await callback.message.edit_text("Послуги ще не налаштовані.")
+        await callback.answer()
+        return
+    await state.set_state(BookingState.service_id)
+    await callback.message.edit_text("Оберіть послугу:", reply_markup=services_keyboard(services))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "client_back_main")
+async def client_back_main(callback: CallbackQuery, state: FSMContext, t, tenant_id: int | None = None):
+    await state.clear()
+    if tenant_id is None:
+        await callback.answer("Tenant не визначено.", show_alert=True)
+        return
+    async with SessionLocal() as session:
+        org = await session.scalar(select(Organization).where(Organization.tenant_id == tenant_id).limit(1))
+    if org:
+        await callback.message.edit_text(
+            t("start_client_welcome", org_name=org.name),
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="📅 Записатися на послугу", callback_data="show_services_list")],
+                    [InlineKeyboardButton(text="🗂 Мої записи", callback_data="client_my_appointments")],
+                ]
+            ),
+        )
+    else:
+        await callback.message.edit_text(t("start_create_business"))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "client_back_dates")
+async def client_back_dates(callback: CallbackQuery):
+    await callback.message.edit_text("Оберіть дату:", reply_markup=dates_keyboard())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "client_back_to_services")
+async def client_back_to_services(callback: CallbackQuery, state: FSMContext, tenant_id: int | None = None):
+    if tenant_id is None:
+        return await callback.answer("Tenant не визначено.", show_alert=True)
+    data = await state.get_data()
+    master_raw = str(data.get("master_id", "any"))
+    if master_raw == "any":
+        title = "Оберіть послугу (майстер буде призначений автоматично):"
+    else:
+        title = "Оберіть послугу:"
+    async with SessionLocal() as session:
+        services = (
+            await session.scalars(
+                select(Service).where(Service.tenant_id == tenant_id).order_by(Service.name.asc())
+            )
+        ).all()
+    await callback.message.edit_text(title, reply_markup=services_keyboard(services))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "client_back_times")
+async def client_back_times(callback: CallbackQuery, state: FSMContext, tenant_id: int | None = None):
+    if tenant_id is None:
+        return await callback.answer("Tenant не визначено.", show_alert=True)
+    data = await state.get_data()
+    service_id = data.get("service_id")
+    date_raw = data.get("booking_date")
+    if not service_id or not date_raw:
+        return await callback.answer("Сесія застаріла. Почніть знову.", show_alert=True)
+    selected_date = date.fromisoformat(date_raw)
+    master_raw = str(data.get("master_id", "any"))
+    master_id = None if master_raw == "any" else int(master_raw)
+    async with SessionLocal() as session:
+        slots = await calculate_available_slots(
+            session,
+            int(service_id),
+            selected_date,
+            tenant_id=tenant_id,
+            master_id=master_id,
+        )
+    await callback.message.edit_text("Оберіть час:", reply_markup=time_slots_keyboard(int(service_id), slots))
+    await callback.answer()
 
 
 @router.message(OnboardingState.waiting_contact, F.contact)
@@ -244,7 +404,7 @@ async def save_phone_onboarding(message: Message, state: FSMContext, t):
     await message.answer(t("onboarding_phone_saved"), reply_markup=ReplyKeyboardRemove())
 
     refreshed_user = await _get_or_create_user(message)
-    await _try_link_deep_appointment(message, refreshed_user, start_arg, t)
+    await _try_link_deep_appointment(message, refreshed_user, start_arg, t, tenant_id=refreshed_user.tenant_id)
     await start(message, state, t)
 
 
@@ -254,49 +414,211 @@ async def contact_required(message: Message, t):
 
 
 @router.message(Command("services"))
-async def show_services(message: Message) -> None:
-    if not await _require_phone_by_tg_id(message.from_user.id):
-        await message.answer("Сначала пройдите онбординг через /start.")
+async def show_services(message: Message, tenant_id: int | None = None) -> None:
+    if tenant_id is None:
+        await message.answer("Tenant не визначено.")
+        return
+    if not await _require_phone_by_tg_id(message.from_user.id, tenant_id=tenant_id):
+        await message.answer("Спочатку пройдіть онбординг через /start.")
         return
     async with SessionLocal() as session:
-        services = (await session.scalars(select(Service).order_by(Service.name.asc()))).all()
+        services = (
+            await session.scalars(
+                select(Service).where(Service.tenant_id == tenant_id).order_by(Service.name.asc())
+            )
+        ).all()
     if not services:
-        await message.answer("No services configured yet.")
+        await message.answer("Послуги ще не налаштовані.")
         return
-    await message.answer("Select a service:", reply_markup=services_keyboard(services))
+    await message.answer("Оберіть послугу:", reply_markup=services_keyboard(services))
+
+
+@router.callback_query(F.data == "client_my_appointments")
+async def client_my_appointments(callback: CallbackQuery, tenant_id: int | None = None):
+    if tenant_id is None:
+        return await callback.answer("Tenant не визначено.", show_alert=True)
+    async with SessionLocal() as session:
+        user = await session.scalar(
+            select(User).where(User.telegram_id == callback.from_user.id, User.tenant_id == tenant_id)
+        )
+        if not user:
+            return await callback.answer("Користувача не знайдено.", show_alert=True)
+        appts = (
+            await session.scalars(
+                select(Appointment)
+                .where(
+                    Appointment.tenant_id == tenant_id,
+                    Appointment.client_id == user.id,
+                    Appointment.status != AppointmentStatus.CANCELLED,
+                )
+                .order_by(Appointment.datetime.asc())
+            )
+        ).all()
+    builder = InlineKeyboardBuilder()
+    if not appts:
+        builder.button(text="⬅️ Назад", callback_data="client_back_main")
+        await callback.message.edit_text("У вас поки немає активних записів.", reply_markup=builder.as_markup())
+        await callback.answer()
+        return
+    for appt in appts:
+        dt_label = appt.datetime.astimezone(settings.tz).strftime("%d.%m %H:%M")
+        builder.button(text=f"🗓 {dt_label}", callback_data=f"client_appt_{appt.id}")
+    builder.adjust(1)
+    builder.row(InlineKeyboardButton(text="⬅️ Назад", callback_data="client_back_main"))
+    await callback.message.edit_text("Оберіть запис для керування:", reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("client_appt_"))
+async def client_appointment_actions(callback: CallbackQuery, tenant_id: int | None = None):
+    if tenant_id is None:
+        return await callback.answer("Tenant не визначено.", show_alert=True)
+    appt_id = int(callback.data.split("_")[-1])
+    async with SessionLocal() as session:
+        appt = await session.scalar(
+            select(Appointment).where(
+                Appointment.id == appt_id,
+                Appointment.tenant_id == tenant_id,
+                Appointment.status != AppointmentStatus.CANCELLED,
+            )
+        )
+        if not appt:
+            return await callback.answer("Запис не знайдено.", show_alert=True)
+        service = await session.scalar(select(Service).where(Service.id == appt.service_id, Service.tenant_id == tenant_id))
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔁 Перезаписатися", callback_data=f"client_reschedule_{appt_id}")
+    builder.button(text="❌ Скасувати", callback_data=f"client_cancel_{appt_id}")
+    builder.button(text="⬅️ Назад", callback_data="client_my_appointments")
+    builder.adjust(1)
+    await callback.message.edit_text(
+        f"Запис: {appt.datetime.astimezone(settings.tz):%d.%m.%Y %H:%M}\nПослуга: {service.name if service else '—'}",
+        reply_markup=builder.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("client_cancel_"))
+async def client_cancel_appointment(callback: CallbackQuery):
+    appt_id = int(callback.data.split("_")[-1])
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Так, скасувати", callback_data=f"client_cancel_confirm_{appt_id}")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"client_appt_{appt_id}")],
+        ]
+    )
+    await callback.message.edit_text("Ви впевнені, що хочете скасувати запис?", reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("client_cancel_confirm_"))
+async def client_cancel_confirm(callback: CallbackQuery, tenant_id: int | None = None):
+    if tenant_id is None:
+        return await callback.answer("Tenant не визначено.", show_alert=True)
+    appt_id = int(callback.data.split("_")[-1])
+    async with SessionLocal() as session:
+        user = await session.scalar(select(User).where(User.telegram_id == callback.from_user.id, User.tenant_id == tenant_id))
+        if not user:
+            return await callback.answer("Користувача не знайдено.", show_alert=True)
+        appt = await session.scalar(
+            select(Appointment).where(
+                Appointment.id == appt_id,
+                Appointment.tenant_id == tenant_id,
+                Appointment.client_id == user.id,
+                Appointment.status != AppointmentStatus.CANCELLED,
+            )
+        )
+        if not appt:
+            return await callback.answer("Запис не знайдено.", show_alert=True)
+        master = await session.scalar(select(Master).where(Master.id == appt.master_id, Master.tenant_id == tenant_id))
+        appt.status = AppointmentStatus.CANCELLED
+        await session.commit()
+
+    client_name = callback.from_user.full_name
+    dt_str = appt.datetime.astimezone(settings.tz).strftime("%d.%m.%Y")
+    tm_str = appt.datetime.astimezone(settings.tz).strftime("%H:%M")
+    notify_text = (
+        f"Клієнт {client_name} скасував запис на {dt_str} о {tm_str} "
+        f"до майстра {(master.name if master else '—')}."
+    )
+    await _notify_admins_about_cancellation(callback.bot, tenant_id, notify_text)
+    await callback.answer("Запис скасовано.")
+    await client_my_appointments(callback, tenant_id=tenant_id)
+
+
+@router.callback_query(F.data.startswith("client_reschedule_"))
+async def client_start_reschedule(callback: CallbackQuery, state: FSMContext, tenant_id: int | None = None):
+    if tenant_id is None:
+        return await callback.answer("Tenant не визначено.", show_alert=True)
+    appt_id = int(callback.data.split("_")[-1])
+    async with SessionLocal() as session:
+        appt = await session.scalar(
+            select(Appointment).where(
+                Appointment.id == appt_id,
+                Appointment.tenant_id == tenant_id,
+                Appointment.status != AppointmentStatus.CANCELLED,
+            )
+        )
+        if not appt:
+            return await callback.answer("Запис не знайдено.", show_alert=True)
+    await state.set_state(RescheduleState.booking_date)
+    await state.update_data(appointment_id=appt_id, service_id=appt.service_id)
+    await callback.message.edit_text("Оберіть нову дату:", reply_markup=dates_keyboard())
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("service:"))
-async def pick_service(callback: CallbackQuery, state: FSMContext) -> None:
-    if not await _require_phone_by_tg_id(callback.from_user.id):
-        await callback.answer("Сначала отправьте телефон через /start", show_alert=True)
+async def pick_service(callback: CallbackQuery, state: FSMContext, tenant_id: int | None = None) -> None:
+    if tenant_id is None:
+        await callback.answer("Tenant не визначено.", show_alert=True)
+        return
+    if not await _require_phone_by_tg_id(callback.from_user.id, tenant_id=tenant_id):
+        await callback.answer("Спочатку відправте телефон через /start", show_alert=True)
         return
     service_id = int(callback.data.split(":")[1])
     await state.update_data(service_id=service_id)
-    await callback.message.edit_text("Select a date:", reply_markup=dates_keyboard())
+    await state.set_state(BookingState.booking_date)
+    await callback.message.edit_text("Оберіть дату:", reply_markup=dates_keyboard())
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("date:"))
-async def pick_date(callback: CallbackQuery, state: FSMContext) -> None:
+async def pick_date(callback: CallbackQuery, state: FSMContext, tenant_id: int | None = None) -> None:
+    if tenant_id is None:
+        await callback.answer("Tenant не визначено.", show_alert=True)
+        return
     data = await state.get_data()
     service_id = data.get("service_id")
     if not service_id:
-        await callback.answer("Please select service first", show_alert=True)
+        await callback.answer("Спочатку оберіть послугу", show_alert=True)
         return
 
     selected_date = date.fromisoformat(callback.data.split(":", maxsplit=1)[1])
     async with SessionLocal() as session:
-        slots = await calculate_available_slots(session, service_id, selected_date)
+        is_holiday = await session.scalar(
+            select(Holiday.id).where(Holiday.tenant_id == tenant_id, Holiday.holiday_date == selected_date)
+        )
+        if is_holiday:
+            await callback.message.edit_text("Ця дата позначена як вихідний. Оберіть іншу дату.", reply_markup=dates_keyboard())
+            await callback.answer()
+            return
+        master_raw = str(data.get("master_id", "any"))
+        master_id = None if master_raw == "any" else int(master_raw)
+        slots = await calculate_available_slots(
+            session,
+            service_id,
+            selected_date,
+            tenant_id=tenant_id,
+            master_id=master_id,
+        )
 
     if not slots:
-        await callback.message.edit_text("No available slots on this date. Pick another date.")
+        await callback.message.edit_text("На цю дату немає вільного часу. Оберіть іншу дату.", reply_markup=dates_keyboard())
         await callback.answer()
         return
 
     await state.update_data(booking_date=selected_date.isoformat())
     await callback.message.edit_text(
-        "Select time:",
+        "Оберіть час:",
         reply_markup=time_slots_keyboard(service_id, slots),
     )
     await callback.answer()
@@ -306,16 +628,19 @@ async def pick_date(callback: CallbackQuery, state: FSMContext) -> None:
 async def pick_time(callback: CallbackQuery) -> None:
     _, service_id, dt_iso = callback.data.split(":", maxsplit=2)
     await callback.message.edit_text(
-        f"Confirm booking at {datetime.fromisoformat(dt_iso).astimezone(settings.tz):%Y-%m-%d %H:%M}?",
+        f"Підтвердити запис на {datetime.fromisoformat(dt_iso).astimezone(settings.tz):%d.%m.%Y %H:%M}?",
         reply_markup=confirm_keyboard(int(service_id), dt_iso),
     )
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("confirm:")) # Исправлено: теперь бот знает, что ловить
-async def confirm_booking(callback: CallbackQuery) -> None:
-    if not await _require_phone_by_tg_id(callback.from_user.id):
-        await callback.answer("Сначала отправьте телефон через /start", show_alert=True)
+async def confirm_booking(callback: CallbackQuery, state: FSMContext, tenant_id: int | None = None) -> None:
+    if tenant_id is None:
+        await callback.answer("Tenant не визначено.", show_alert=True)
+        return
+    if not await _require_phone_by_tg_id(callback.from_user.id, tenant_id=tenant_id):
+        await callback.answer("Спочатку відправте телефон через /start", show_alert=True)
         return
     _, service_id_raw, dt_iso = callback.data.split(":", maxsplit=2)
     service_id = int(service_id_raw)
@@ -324,32 +649,83 @@ async def confirm_booking(callback: CallbackQuery) -> None:
     async with SessionLocal() as session:
         user = await session.scalar(select(User).where(User.telegram_id == callback.from_user.id))
         if user is None:
-            await callback.answer("Please send /start first", show_alert=True)
+            await callback.answer("Спочатку надішліть /start", show_alert=True)
             return
 
         service = await session.get(Service, service_id)
-        if service is None:
-            await callback.answer("Service not found", show_alert=True)
+        if service is None or service.tenant_id != tenant_id:
+            await callback.answer("Послугу не знайдено", show_alert=True)
             return
 
-        available = await calculate_available_slots(session, service.id, appointment_dt.date())
+        state_data = await state.get_data()
+        master_raw = str(state_data.get("master_id", "any"))
+        selected_master_id = None if master_raw == "any" else int(master_raw)
+        available = await calculate_available_slots(
+            session,
+            service.id,
+            appointment_dt.date(),
+            tenant_id=tenant_id,
+            master_id=selected_master_id,
+        )
         if appointment_dt not in available:
-            await callback.message.edit_text("Selected slot is no longer available. Please try again.")
+            await callback.message.edit_text("Обраний слот вже недоступний. Спробуйте ще раз.")
             await callback.answer()
             return
 
-        appointment = Appointment(
-            client_id=user.id,
-            service_id=service.id,
-            datetime=appointment_dt,
-            status=AppointmentStatus.CONFIRMED,
-        )
-        session.add(appointment)
+        appt_to_reschedule_id = state_data.get("appointment_id")
+        master_id_to_save: int | None = selected_master_id
+        if master_id_to_save is None:
+            masters = (
+                await session.scalars(
+                    select(Master).where(Master.tenant_id == tenant_id).order_by(Master.id.asc())
+                )
+            ).all()
+            for master in masters:
+                master_slots = await calculate_available_slots(
+                    session,
+                    service.id,
+                    appointment_dt.date(),
+                    tenant_id=tenant_id,
+                    master_id=master.id,
+                )
+                if appointment_dt in master_slots:
+                    master_id_to_save = master.id
+                    break
+            if master_id_to_save is None:
+                await callback.message.edit_text("Немає доступного майстра на цей час. Оберіть інший слот.")
+                await callback.answer()
+                return
+        if appt_to_reschedule_id:
+            appt = await session.scalar(
+                select(Appointment).where(
+                    Appointment.id == int(appt_to_reschedule_id),
+                    Appointment.tenant_id == tenant_id,
+                    Appointment.client_id == user.id,
+                    Appointment.status != AppointmentStatus.CANCELLED,
+                )
+            )
+            if not appt:
+                await callback.answer("Запис для перезапису не знайдено.", show_alert=True)
+                return
+            appt.datetime = appointment_dt
+            appt.service_id = service.id
+            appt.master_id = master_id_to_save
+        else:
+            appointment = Appointment(
+                tenant_id=tenant_id,
+                client_id=user.id,
+                service_id=service.id,
+                master_id=master_id_to_save,
+                datetime=appointment_dt,
+                status=AppointmentStatus.CONFIRMED,
+            )
+            session.add(appointment)
         await session.commit()
+        await state.clear()
 
     await callback.message.edit_text(
-        f"Booked successfully.\nService: {service.name}\n"
-        f"When: {appointment_dt:%Y-%m-%d %H:%M} ({settings.timezone})"
+        f"Запис успішно збережено.\nПослуга: {service.name}\n"
+        f"Коли: {appointment_dt:%d.%m.%Y %H:%M} ({settings.timezone})"
     )
     await callback.answer()
 

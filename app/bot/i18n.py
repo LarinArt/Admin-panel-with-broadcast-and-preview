@@ -7,11 +7,11 @@ from aiogram.types import TelegramObject, User as TgUser
 from sqlalchemy import select
 
 from app.database.engine import SessionLocal
-from app.database.models import User
+from app.database.models import Tenant, User
 
 
-SUPPORTED_LANGS = {"uk", "ru", "en"}
-DEFAULT_LANG = "ru"
+SUPPORTED_LANGS = {"uk"}
+DEFAULT_LANG = "uk"
 
 
 class I18n:
@@ -41,6 +41,16 @@ class I18n:
 i18n = I18n()
 
 
+async def get_tenant_id_by_bot_id(bot_id: int) -> int | None:
+    async with SessionLocal() as session:
+        tenant = await session.scalar(
+            select(Tenant).where(Tenant.bot_token.like(f"{bot_id}:%"), Tenant.is_active.is_(True))
+        )
+        if tenant:
+            return tenant.id
+    return None
+
+
 class I18nMiddleware(BaseMiddleware):
     async def __call__(
         self,
@@ -49,15 +59,24 @@ class I18nMiddleware(BaseMiddleware):
         data: dict[str, Any],
     ) -> Any:
         from_user: TgUser | None = data.get("event_from_user")
+        bot = data.get("bot")
         lang = i18n.normalize_lang(from_user.language_code if from_user else None)
+        tenant_id: int | None = None
+
+        if bot:
+            tenant_id = await get_tenant_id_by_bot_id(bot.id)
 
         if from_user:
             async with SessionLocal() as session:
                 db_user = await session.scalar(select(User).where(User.telegram_id == from_user.id))
                 if db_user and db_user.language_code:
                     lang = i18n.normalize_lang(db_user.language_code)
+                if db_user and db_user.tenant_id is None and tenant_id is not None:
+                    db_user.tenant_id = tenant_id
+                    await session.commit()
 
         data["lang"] = lang
+        data["tenant_id"] = tenant_id
         data["i18n"] = i18n
         data["t"] = lambda key, **kwargs: i18n.t(key, lang, **kwargs)
         return await handler(event, data)
