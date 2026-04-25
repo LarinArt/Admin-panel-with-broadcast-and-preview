@@ -15,7 +15,8 @@ class Settings(BaseSettings):
     bot_token: str = Field(alias="BOT_TOKEN")
     database_url: str = Field(alias="DATABASE_URL")
     timezone: str = Field(default="Europe/Kiev", alias="TIMEZONE")
-    def get_tz(self) -> ZoneInfo:
+    @property
+    def tz(self) -> ZoneInfo:
         return ZoneInfo(self.timezone)
 
     admin_telegram_ids: list[int] = Field(default_factory=list, alias="ADMIN_TELEGRAM_IDS")
