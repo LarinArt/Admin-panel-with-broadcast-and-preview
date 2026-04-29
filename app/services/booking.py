@@ -9,7 +9,6 @@ from app.services.working_hours import get_working_hours
 
 settings = get_settings()
 
-
 async def calculate_available_slots(
     session: AsyncSession,
     service_id: int,
@@ -18,7 +17,7 @@ async def calculate_available_slots(
     master_id: int | None = None,
 ) -> list[datetime]:
     service = await session.get(Service, service_id)
-    if service is None:
+    if service is None or service.tenant_id != tenant_id:
         return []
 
     holiday = await session.scalar(
@@ -30,7 +29,10 @@ async def calculate_available_slots(
     if holiday:
         return []
 
+    # Получаем часы работы
     start_time, end_time = get_working_hours(tenant_id, target_date.weekday())
+    
+    # Создаем границы дня с часовым поясом
     day_start = datetime.combine(target_date, start_time, tzinfo=settings.tz)
     day_end = datetime.combine(target_date, end_time, tzinfo=settings.tz)
     now = datetime.now(settings.tz)
@@ -43,13 +45,22 @@ async def calculate_available_slots(
     ]
     if master_id is not None:
         filters.append(Appointment.master_id == master_id)
+    
     existing_stmt = select(Appointment).join(Service, Service.id == Appointment.service_id).where(and_(*filters))
     existing_appointments = (await session.scalars(existing_stmt)).all()
 
     busy_ranges: list[tuple[datetime, datetime]] = []
     for appt in existing_appointments:
-        appt_end = appt.datetime + timedelta(minutes=appt.service.duration_minutes)
-        busy_ranges.append((appt.datetime, appt_end))
+        # Обеспечиваем, что datetime имеет информацию о часовом поясе
+        # SQLite может возвращать naive datetime даже для колонки с timezone=True
+        if appt.datetime.tzinfo is None:
+            # Если naive datetime, предполагаем, что он в часовом поясе settings.tz
+            appt_start = appt.datetime.replace(tzinfo=settings.tz)
+        else:
+            # Если уже aware datetime, конвертируем в settings.tz
+            appt_start = appt.datetime.astimezone(settings.tz)
+        appt_end = appt_start + timedelta(minutes=appt.service.duration_minutes)
+        busy_ranges.append((appt_start, appt_end))
 
     step = timedelta(minutes=settings.slot_step_minutes)
     duration = timedelta(minutes=service.duration_minutes)
@@ -57,6 +68,7 @@ async def calculate_available_slots(
     slots: list[datetime] = []
 
     while candidate + duration <= day_end:
+        # Сравнение теперь сработает, так как оба объекта имеют tzinfo
         if candidate > now:
             candidate_end = candidate + duration
             overlaps = any(

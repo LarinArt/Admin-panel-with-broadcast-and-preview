@@ -9,6 +9,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -18,25 +19,34 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+
 class Base(DeclarativeBase):
     pass
+
 
 class UserRole(StrEnum):
     SUPER_ADMIN = "super_admin"
     ADMIN = "admin"
     CLIENT = "client"
 
+
 class AppointmentStatus(StrEnum):
     PENDING = "pending"
     CONFIRMED = "confirmed"
     CANCELLED = "cancelled"
 
+
 class Tenant(Base):
     __tablename__ = "tenants"
+    __table_args__ = (
+        Index('idx_tenant_subscription_ends', 'id', 'subscription_ends_at'),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     bot_token: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    plan_name: Mapped[str] = mapped_column(String(50), default='base')
+    subscription_ends_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -47,6 +57,7 @@ class Tenant(Base):
     appointments: Mapped[list["Appointment"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
     schedules: Mapped[list["Schedule"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
     holidays: Mapped[list["Holiday"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
+
 
 class User(Base):
     __tablename__ = "users"
@@ -64,6 +75,7 @@ class User(Base):
     appointments: Mapped[list["Appointment"]] = relationship(back_populates="client")
     organizations: Mapped[list["Organization"]] = relationship(back_populates="owner")
 
+
 class Organization(Base):
     __tablename__ = "organizations"
 
@@ -79,6 +91,7 @@ class Organization(Base):
     services: Mapped[list["Service"]] = relationship(back_populates="organization")
     masters: Mapped[list["Master"]] = relationship(back_populates="organization", cascade="all, delete-orphan")
 
+
 class Service(Base):
     __tablename__ = "services"
 
@@ -92,6 +105,7 @@ class Service(Base):
     tenant: Mapped["Tenant"] = relationship(back_populates="services")
     organization: Mapped["Organization"] = relationship(back_populates="services")
     appointments: Mapped[list["Appointment"]] = relationship(back_populates="service")
+
 
 class Master(Base):
     __tablename__ = "masters"
@@ -107,6 +121,7 @@ class Master(Base):
     organization: Mapped["Organization"] = relationship(back_populates="masters")
     appointments: Mapped[list["Appointment"]] = relationship(back_populates="master")
     schedules: Mapped[list["Schedule"]] = relationship(back_populates="master", cascade="all, delete-orphan")
+
 
 class Appointment(Base):
     __tablename__ = "appointments"
@@ -134,6 +149,7 @@ class Appointment(Base):
     service: Mapped["Service"] = relationship(back_populates="appointments")
     master: Mapped["Master"] = relationship(back_populates="appointments")
 
+
 class Schedule(Base):
     __tablename__ = "schedules"
     __table_args__ = (
@@ -151,6 +167,7 @@ class Schedule(Base):
     tenant: Mapped["Tenant"] = relationship(back_populates="schedules")
     master: Mapped["Master"] = relationship(back_populates="schedules")
 
+
 class Holiday(Base):
     __tablename__ = "holidays"
     __table_args__ = (
@@ -164,3 +181,19 @@ class Holiday(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     tenant: Mapped["Tenant"] = relationship(back_populates="holidays")
+
+
+class Payment(Base):
+    __tablename__ = "payments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
+    amount: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20))  # pending/success/etc.
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    tenant: Mapped["Tenant"] = relationship(back_populates="payments")
+
+
+# Add backref to Tenant for payments if needed
+Tenant.payments = relationship("Payment", order_by=Payment.id, back_populates="tenant")

@@ -17,7 +17,16 @@ class Settings(BaseSettings):
     timezone: str = Field(default="Europe/Kiev", alias="TIMEZONE")
     @property
     def tz(self) -> ZoneInfo:
-        return ZoneInfo(self.timezone)
+        """Свойство для вызова через settings.tz (как хочет inline.py)"""
+        try:
+            return ZoneInfo(self.timezone)
+        except Exception:
+            # Если в .env написана ерунда, вернем Киев по умолчанию
+            return ZoneInfo("Europe/Kiev")
+
+    def get_tz(self) -> ZoneInfo:
+        """Метод для старого кода, который вызывает settings.get_tz()"""
+        return self.tz  # Просто перенаправляем на свойство выше
 
     admin_telegram_ids: list[int] = Field(default_factory=list, alias="ADMIN_TELEGRAM_IDS")
     work_start_hour: int = Field(default=9, alias="WORK_START_HOUR")

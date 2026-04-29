@@ -1,0 +1,22 @@
+/* Custom styles for the app */
+:root {
+  --tg-theme-bg-color: var(--tg-theme-bg-color, #ffffff);
+  --tg-theme-text-color: var(--tg-theme-text-color, #000000);
+  --tg-theme-secondary-bg-color: var(--tg-theme-secondary-bg-color, #f5f5f5);
+  --tg-theme-accent-color: var(--tg-theme-accent-color, #0066ff);
+  --tg-theme-hint-color: var(--tg-theme-hint-color, #666666);
+  --tg-theme-link-color: var(--tg-theme-link-color, #0066ff);
+  --tg-theme-button-color: var(--tg-theme-button-color, #0066ff);
+  --tg-theme-button-text-color: var(--tg-theme-button-text-color, #ffffff);
+}
+
+/* Fallback colors for development */
+body {
+  background-color: var(--tg-theme-bg-color);
+  color: var(--tg-theme-text-color);
+}
+
+/* Card hover effect */
+.bg-card-hover:hover {
+  background-color: var(--tg-theme-secondary-bg-color);
+}

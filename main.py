@@ -15,7 +15,7 @@ from app.bot.i18n import I18nMiddleware
 from app.database.engine import init_models
 from app.config import get_settings
 from app.services.scheduler import build_scheduler
-from app.bot.handlers import admin_router, client_router 
+from app.bot.handlers import admin_router, client_router, start_router
 
 def setup_logging() -> None:
     logging.basicConfig(
@@ -41,6 +41,7 @@ async def main() -> None:
     # 3. Регистрируем роутеры
     dp.include_router(admin_router)
     dp.include_router(client_router)
+    dp.include_router(start_router)
     
     # 4. Запускаем планировщик напоминаний
     scheduler = build_scheduler(bot)

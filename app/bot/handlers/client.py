@@ -1,12 +1,13 @@
 from datetime import date, datetime
 
 from aiogram import F, Router
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from sqlalchemy import select
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.exceptions import TelegramBadRequest
 
 from app.bot.keyboards.inline import (
     confirm_keyboard,
@@ -499,50 +500,102 @@ async def client_appointment_actions(callback: CallbackQuery, tenant_id: int | N
 
 @router.callback_query(F.data.startswith("client_cancel_"))
 async def client_cancel_appointment(callback: CallbackQuery):
+    # 1. Сразу отвечаем на callback, чтобы кнопка перестала "мигать"
+    await callback.answer()
+    
     appt_id = int(callback.data.split("_")[-1])
+    
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="✅ Так, скасувати", callback_data=f"client_cancel_confirm_{appt_id}")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"client_appt_{appt_id}")],
         ]
     )
-    await callback.message.edit_text("Ви впевнені, що хочете скасувати запис?", reply_markup=kb)
-    await callback.answer()
 
-
-@router.callback_query(F.data.startswith("client_cancel_confirm_"))
-async def client_cancel_confirm(callback: CallbackQuery, tenant_id: int | None = None):
-    if tenant_id is None:
-        return await callback.answer("Tenant не визначено.", show_alert=True)
-    appt_id = int(callback.data.split("_")[-1])
-    async with SessionLocal() as session:
-        user = await session.scalar(select(User).where(User.telegram_id == callback.from_user.id, User.tenant_id == tenant_id))
-        if not user:
-            return await callback.answer("Користувача не знайдено.", show_alert=True)
-        appt = await session.scalar(
-            select(Appointment).where(
-                Appointment.id == appt_id,
-                Appointment.tenant_id == tenant_id,
-                Appointment.client_id == user.id,
-                Appointment.status != AppointmentStatus.CANCELLED,
-            )
+    # 2. Оборачиваем в try-except для защиты от двойных нажатий
+    try:
+        await callback.message.edit_text(
+            "Ви впевнені, що хочете скасувати запис?", 
+            reply_markup=kb
         )
-        if not appt:
-            return await callback.answer("Запис не знайдено.", show_alert=True)
-        master = await session.scalar(select(Master).where(Master.id == appt.master_id, Master.tenant_id == tenant_id))
-        appt.status = AppointmentStatus.CANCELLED
-        await session.commit()
+    except TelegramBadRequest as e:
+        # Если текст и кнопки те же самые, Telegram вернет ошибку "message is not modified"
+        if "message is not modified" in e.message:
+            pass # Просто игнорируем, сообщение уже выглядит так, как нам нужно
+        else:
+            raise e # Если ошибка другая (например, сообщение удалено) — пробрасываем выше
 
-    client_name = callback.from_user.full_name
-    dt_str = appt.datetime.astimezone(settings.tz).strftime("%d.%m.%Y")
-    tm_str = appt.datetime.astimezone(settings.tz).strftime("%H:%M")
-    notify_text = (
-        f"Клієнт {client_name} скасував запис на {dt_str} о {tm_str} "
-        f"до майстра {(master.name if master else '—')}."
-    )
-    await _notify_admins_about_cancellation(callback.bot, tenant_id, notify_text)
-    await callback.answer("Запис скасовано.")
-    await client_my_appointments(callback, tenant_id=tenant_id)
+# Добавьте state=None или фильтр на любое состояние
+@router.callback_query(F.data.startswith("client_cancel_confirm_"), StateFilter(None)) 
+# ИЛИ просто разрешите любые состояния:
+@router.callback_query(F.data.startswith("client_cancel_confirm_"))
+async def client_cancel_confirm(
+    callback: CallbackQuery, 
+    state: FSMContext,    # Добавили FSM
+    t,                    # Добавили переводчик (важно для i18n middleware)
+    tenant_id: int | None = None
+):
+    # 1. Сразу логируем в консоль, чтобы убедиться, что вход выполнен
+    print(f"!!! ХЕНДЛЕР СРАБОТАЛ для ID: {callback.data}")
+    
+    await callback.answer() # Убираем индикатор загрузки
+
+    if tenant_id is None:
+        tenant_id = await get_tenant_id_by_bot_id(callback.bot.id)
+
+    appt_id = int(callback.data.split("_")[-1])
+
+    try:
+        async with SessionLocal() as session:
+            # Ищем юзера
+            user = await session.scalar(
+                select(User).where(User.telegram_id == callback.from_user.id, User.tenant_id == tenant_id)
+            )
+            
+            if not user:
+                print("ОШИБКА: Юзер не найден в БД")
+                return await callback.message.answer("Користувача не знайдено.")
+
+            # Ищем запись
+            appt = await session.scalar(
+                select(Appointment).where(
+                    Appointment.id == appt_id,
+                    Appointment.tenant_id == tenant_id,
+                    Appointment.client_id == user.id,
+                    Appointment.status != AppointmentStatus.CANCELLED
+                )
+            )
+
+            if not appt:
+                print("ОШИБКА: Запись не найдена или уже отменена")
+                return await client_my_appointments(callback, tenant_id=tenant_id)
+
+            # Отменяем
+            appt_time = appt.datetime
+            master_id = appt.master_id
+            appt.status = AppointmentStatus.CANCELLED
+            await session.commit()
+            
+            master = await session.get(Master, master_id)
+            master_name = master.name if master else "—"
+
+        # Уведомление админов
+        dt_str = appt_time.astimezone(settings.tz).strftime("%d.%m.%Y %H:%M")
+        notify_text = f"❌ Скасовано: {callback.from_user.full_name} на {dt_str} (Майстер: {master_name})"
+        await _notify_admins_about_cancellation(callback.bot, tenant_id, notify_text)
+
+        # Очищаем состояние, если пользователь был в процессе чего-то
+        await state.clear()
+        
+        # Обновляем сообщение
+        await callback.message.edit_text("✅ Запис успішно скасовано.")
+        
+        # Предлагаем вернуться в меню через 1 секунду или обновляем список
+        await client_my_appointments(callback, tenant_id=tenant_id)
+
+    except Exception as e:
+        print(f"КРИТИЧЕСКАЯ ОШИБКА: {e}")
+        await callback.message.answer("Виникла помилка. Спробуйте пізніше.")
 
 
 @router.callback_query(F.data.startswith("client_reschedule_"))
@@ -575,6 +628,11 @@ async def pick_service(callback: CallbackQuery, state: FSMContext, tenant_id: in
         await callback.answer("Спочатку відправте телефон через /start", show_alert=True)
         return
     service_id = int(callback.data.split(":")[1])
+    async with SessionLocal() as session:
+        service = await session.get(Service, service_id)
+        if not service or service.tenant_id != tenant_id:
+            await callback.answer("Послугу не знайдено", show_alert=True)
+            return
     await state.update_data(service_id=service_id)
     await state.set_state(BookingState.booking_date)
     await callback.message.edit_text("Оберіть дату:", reply_markup=dates_keyboard())

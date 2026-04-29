@@ -1,0 +1,14 @@
+{
+  "app": {
+    "header": "Запис до {tenantName}",
+    "loading": "Завантаження...",
+    "error": "Не вдалося завантажити послуги. Спробуйте ще раз.",
+    "noServices": "У цьому салону временно немає доступних послуг.",
+    "confirmButton": "Підтвердити вибір",
+    "serviceSelected": "Ви обрали послугу з ID: {serviceId}"
+  },
+  "serviceCard": {
+    "duration": "Тривалість: {duration} хв",
+    "price": "Ціна: {price} грн"
+  }
+}

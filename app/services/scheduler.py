@@ -56,15 +56,15 @@ async def _send_due_reminders(bot: Bot) -> None:
                 continue
 
             try:
-                # Формируем время именно в твоем часовом поясе
-                display_time = appointment.datetime.astimezone(tz).strftime('%d.%m в %H:%M')
+                # Формируем время именно в твоем часовом поясе (змінено "в" на "о")
+                display_time = appointment.datetime.astimezone(tz).strftime('%d.%m о %H:%M')
                 
                 text = (
-                    f"🌸 <b>Напоминание о визите</b>\n\n"
-                    f"Ждем вас: <code>{display_time}</code>\n"
-                    f"Услуга: <b>{appointment.service.name}</b>\n"
-                    f"Мастер: <b>{appointment.master.name}</b>\n\n"
-                    f"📍 Пожалуйста, если ваши планы изменились, предупредите нас заранее."
+                    f"🌸 <b>Нагадування про візит</b>\n\n"
+                    f"Чекаємо на вас: <code>{display_time}</code>\n"
+                    f"Послуга: <b>{appointment.service.name}</b>\n"
+                    f"Майстер: <b>{appointment.master.name}</b>\n\n"
+                    f"📍 Будь ласка, якщо ваші плани змінилися, попередьте нас заздалегідь."
                 )
 
                 # --- ДОБАВЛЕННЫЙ БЛОК С КНОПКОЙ ---
