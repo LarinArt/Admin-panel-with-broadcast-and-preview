@@ -65,6 +65,7 @@ class User(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True, nullable=True)
     telegram_id: Mapped[Optional[int]] = mapped_column(BigInteger, unique=True, index=True, nullable=True)
+    username: Mapped[str | None] = mapped_column(String(255), nullable=True)
     role: Mapped[UserRole] = mapped_column(Enum(UserRole), default=UserRole.CLIENT)
     language_code: Mapped[str] = mapped_column(String(5), default="uk")
     full_name: Mapped[str] = mapped_column(String(255))

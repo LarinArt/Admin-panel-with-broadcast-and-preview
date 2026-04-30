@@ -9,5 +9,11 @@
   "start_link_already": "This appointment is already linked to another user.",
   "start_link_not_found": "Appointment from this link was not found.",
   "lang_choose": "Выберите язык / Оберіть мову / Choose language",
-  "lang_saved": "Language saved."
+  "lang_saved": "Language saved.",
+  "subscription.expired.master_admin": "⚠️ Warning! Subscription for salon «{tenant_name}» has expired. You have access only to the «Payment» section to renew subscription. All other management functions are blocked.",
+  "subscription.expired.admin_master": "⚠️ Warning! System operation has been suspended by the owner due to subscription expiration. Please wait for notifications about service restoration.",
+  "subscription.expired.client": "⚠️ Warning! Booking is temporarily unavailable due to technical work. We apologize for the inconvenience.",
+  "subscription.grace_period.master_admin": "ℹ️ Reminder: your subscription ends on {date}. Please renew it to avoid functionality blocking.",
+  "subscription.grace_period.admin_master": "ℹ️ Reminder: salon subscription ends on {date}. After this date, system access will be limited.",
+  "subscription.grace_period.client": "ℹ️ Reminder: due to technical work, booking may be temporarily unavailable after {date}."
 }

@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 import logging
 import time
+from datetime import datetime, timedelta
 
 from aiogram.utils.web_app import safe_parse_webapp_init_data
 
@@ -17,12 +18,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Grace period in days after subscription ends
+GRACE_PERIOD_DAYS = 3
+
 app = FastAPI(title="Telegram Mini App API")
 
 # Настройка CORS для работы с фронтендом на localhost:5173 и ngrok туннеле
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "https://silica-getup-fox.ngrok-free.dev"],
+    allow_origins=["http://localhost:5173", "http://localhost:5174", "https://silica-getup-fox.ngrok-free.dev"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -86,6 +90,27 @@ def validate_init_data(init_data: str) -> dict:
             "hash": "fake_hash",
         }
 
+async def check_tenant_subscription(tenant_id: int, db: AsyncSession) -> tuple[bool, bool, Optional[datetime]]:
+    """
+    Check tenant subscription status.
+    Returns: (is_active, is_expired, subscription_ends_at)
+    """
+    stmt = select(Tenant).where(Tenant.id == tenant_id)
+    result = await db.execute(stmt)
+    tenant = result.scalar_one_or_none()
+    
+    if not tenant:
+        return False, False, None
+    
+    now = datetime.now(tenant.subscription_ends_at.tzinfo
+                       if tenant.subscription_ends_at and tenant.subscription_ends_at.tzinfo
+                       else None)
+    is_expired = tenant.subscription_ends_at and now > tenant.subscription_ends_at
+    is_active = tenant.is_active and not is_expired
+    
+    return is_active, is_expired, tenant.subscription_ends_at
+
+
 @app.post("/api/get_services", response_model=List[ServiceResponse])
 async def get_services(
     request: InitDataRequest,
@@ -106,7 +131,6 @@ async def get_services(
         new_user = User(
             telegram_id=telegram_id,
             full_name=f"{user_data['first_name']} {user_data['last_name'] or ''}".strip(),
-            username=user_data["username"],
             language_code=user_data["language_code"] or "uk",
             role=UserRole.CLIENT,
             tenant_id=request.tenant_id,
@@ -124,6 +148,17 @@ async def get_services(
             await db.commit()
             logger.info(f"Обновлен tenant_id для пользователя {user.id}")
 
+    # Проверяем статус подписки тенанта
+    is_active, is_expired, subscription_ends_at = await check_tenant_subscription(
+        request.tenant_id, db
+    )
+    
+    # Если подписка неактивна или истекла (и не в льготный период), блокируем доступ
+    if not is_active:
+        # Для простоты, возвращаем пустой список услуг
+        # В реальном приложении можно вернуть специальную ошибку
+        return []
+
     # Получаем список услуг для данного tenant_id
     stmt = select(Service).where(Service.tenant_id == request.tenant_id)
     result = await db.execute(stmt)
@@ -139,6 +174,7 @@ async def get_services(
         )
         for service in services
     ]
+
 
 # Для запуска напрямую (например, для разработки)
 if __name__ == "__main__":

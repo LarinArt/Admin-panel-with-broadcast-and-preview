@@ -1,5 +1,5 @@
 export const getServices = async (initData, tenantId) => {
-  const response = await fetch('http://localhost:8000/api/get_services', {
+  const response = await fetch('/api/get_services', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

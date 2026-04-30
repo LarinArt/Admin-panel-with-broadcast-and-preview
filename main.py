@@ -16,6 +16,7 @@ from app.database.engine import init_models
 from app.config import get_settings
 from app.services.scheduler import build_scheduler
 from app.bot.handlers import admin_router, client_router, start_router
+from app.bot.middlewares.auth import setup_subscription_middleware
 
 def setup_logging() -> None:
     logging.basicConfig(
@@ -37,6 +38,10 @@ async def main() -> None:
     bot = Bot(token=settings.bot_token)
     dp = Dispatcher(storage=MemoryStorage())
     dp.update.middleware(I18nMiddleware())
+
+    # Setup subscription middleware
+    from app.bot.middlewares.auth import setup_subscription_middleware
+    setup_subscription_middleware(dp)
 
     # 3. Регистрируем роутеры
     dp.include_router(admin_router)

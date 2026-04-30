@@ -9,5 +9,11 @@
   "start_link_already": "Цей запис уже прив'язано до іншого користувача.",
   "start_link_not_found": "Запис за цим посиланням не знайдено.",
   "lang_choose": "Выберите язык / Оберіть мову / Choose language",
-  "lang_saved": "Мову збережено."
+  "lang_saved": "Мову збережено.",
+  "subscription.expired.master_admin": "⚠️ Увага! Підписка для салону «{tenant_name}» закінчилася. Ви маєте доступ лише до розділу «Оплата» для подовження підписки. Всі інші функції керування заблоковані.",
+  "subscription.expired.admin_master": "⚠️ Увага! Роботу системи призупинено власником через закінчення підписки. Будь ласка, зачекайте на сповіщення про відновлення роботи.",
+  "subscription.expired.client": "⚠️ Увага! Запис tymczasowo niedostępny z powodu prac technicznych. Przepraszamy za utrudnienia.",
+  "subscription.grace_period.master_admin": "ℹ️ Нагадування: ваша підписка закінчиться {date}. Будь ласка, подовжте її, щоб избежати блокування функціоналу.",
+  "subscription.grace_period.admin_master": "ℹ️ Нагадування: підписка салону закінчиться {date}. Після цієї дати доступ до системи буде обмежений.",
+  "subscription.grace_period.client": "ℹ️ Нагадування: через технічні работи запис може бути тимчасово недоступним після {date}."
 }
