@@ -10,9 +10,9 @@ from aiogram.utils.web_app import safe_parse_webapp_init_data
 
 from app.config import get_settings
 from app.database.engine import SessionLocal, init_models
-from app.database.models import User, Service, Tenant, UserRole
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.database.models import User, Service, Tenant, UserRole, Master, Appointment, AppointmentStatus, Organization
+from sqlalchemy import select, and_, func
+from sqlalchemy.orm import selectinload
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -50,6 +50,26 @@ class ServiceResponse(BaseModel):
     name: str
     duration_minutes: int
     price: float
+
+class MasterResponse(BaseModel):
+    id: int
+    name: str
+    specialty: Optional[str] = None
+
+class AvailableSlotResponse(BaseModel):
+    time: str
+    master_id: int
+    master_name: str
+
+class BookingRequest(BaseModel):
+    init_data: str
+    tenant_id: int
+    service_id: int
+    master_id: int
+    date: str  # format: YYYY-MM-DD
+    time: str  # format: HH:MM
+    client_name: Optional[str] = None
+    client_phone: Optional[str] = None
 
 # Dependency для получения асинхронной сессии БД
 async def get_db() -> AsyncSession:
@@ -131,8 +151,6 @@ async def get_services(
     user = result.scalar_one_or_none()
 
     if user is None:
-        # Создаем нового пользователя с ролью client
-        # Привязываем к tenant_id из запроса
         new_user = User(
             telegram_id=telegram_id,
             full_name=f"{user_data['first_name']} {user_data['last_name'] or ''}".strip(),
@@ -147,29 +165,22 @@ async def get_services(
         user = new_user
         logger.info(f"Создан новый пользователь: {user.id}")
     else:
-        # Если пользователь существует, но не привязан к тенанту, привязываем
         if user.tenant_id != request.tenant_id:
             user.tenant_id = request.tenant_id
             await db.commit()
             logger.info(f"Обновлен tenant_id для пользователя {user.id}")
 
-    # Проверяем статус подписки тенанта
     is_active, is_expired, subscription_ends_at = await check_tenant_subscription(
         request.tenant_id, db
     )
     
-    # Если подписка неактивна или истекла (и не в льготный период), блокируем доступ
     if not is_active:
-        # Для простоты, возвращаем пустой список услуг
-        # В реальном приложении можно вернуть специальную ошибку
         return []
 
-    # Получаем список услуг для данного tenant_id
     stmt = select(Service).where(Service.tenant_id == request.tenant_id)
     result = await db.execute(stmt)
     services = result.scalars().all()
 
-    # Преобразуем в список Pydantic моделей
     return [
         ServiceResponse(
             id=service.id,
@@ -179,6 +190,199 @@ async def get_services(
         )
         for service in services
     ]
+
+
+# --- НОВЫЕ ЭНДПОИНТЫ ДЛЯ ЗАПИСИ ---
+
+class MastersRequest(BaseModel):
+    init_data: str
+    tenant_id: int
+
+@app.post("/api/masters", response_model=List[MasterResponse])
+async def get_masters(
+    request: MastersRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """Получить список мастеров для tenant_id"""
+    user_data = validate_init_data(request.init_data)
+    
+    is_active, _, _ = await check_tenant_subscription(request.tenant_id, db)
+    if not is_active:
+        raise HTTPException(status_code=403, detail="Tenant subscription inactive")
+    
+    stmt = select(Master).where(Master.tenant_id == request.tenant_id)
+    result = await db.execute(stmt)
+    masters = result.scalars().all()
+    
+    return [
+        MasterResponse(id=m.id, name=m.name, specialty=m.specialty)
+        for m in masters
+    ]
+
+
+class AvailableSlotsRequest(BaseModel):
+    init_data: str
+    tenant_id: int
+    service_id: int
+    master_id: int
+    date: str  # YYYY-MM-DD
+
+@app.post("/api/available_slots", response_model=List[AvailableSlotResponse])
+async def get_available_slots(
+    request: AvailableSlotsRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """Получить свободные слоты на дату для мастера и услуги"""
+    from datetime import datetime as dt_datetime, timedelta
+    
+    user_data = validate_init_data(request.init_data)
+    
+    is_active, _, _ = await check_tenant_subscription(request.tenant_id, db)
+    if not is_active:
+        raise HTTPException(status_code=403, detail="Subscription inactive")
+    
+    try:
+        target_date = dt_datetime.strptime(request.date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+    
+    master = await db.scalar(select(Master).where(
+        Master.id == request.master_id,
+        Master.tenant_id == request.tenant_id
+    ))
+    if not master:
+        raise HTTPException(status_code=404, detail="Master not found")
+    
+    from app.services.working_hours import get_working_hours
+    try:
+        start_time, end_time = get_working_hours(request.tenant_id, target_date.weekday())
+    except Exception:
+        return []
+    
+    service = await db.scalar(select(Service).where(Service.id == request.service_id))
+    if not service:
+        raise HTTPException(status_code=404, detail="Service not found")
+    
+    slot_duration = service.duration_minutes
+    start_dt = dt_datetime.combine(target_date, start_time)
+    end_dt = dt_datetime.combine(target_date, end_time)
+    
+    slots = []
+    current = start_dt
+    while current + timedelta(minutes=slot_duration) <= end_dt:
+        slot_end = current + timedelta(minutes=slot_duration)
+        
+        conflicting = await db.scalar(
+            select(Appointment).where(
+                Appointment.master_id == request.master_id,
+                Appointment.datetime >= current,
+                Appointment.datetime < slot_end,
+                Appointment.status != AppointmentStatus.CANCELLED,
+                Appointment.tenant_id == request.tenant_id,
+            )
+        )
+        
+        if not conflicting:
+            slots.append({
+                "time": current.strftime("%H:%M"),
+                "master_id": request.master_id,
+                "master_name": master.name,
+            })
+        
+        current += timedelta(minutes=30)
+    
+    return slots
+
+
+class BookingRequest(BaseModel):
+    init_data: str
+    tenant_id: int
+    service_id: int
+    master_id: int
+    date: str  # YYYY-MM-DD
+    time: str  # HH:MM
+    client_name: Optional[str] = None
+    client_phone: Optional[str] = None
+
+@app.post("/api/book")
+async def create_booking(
+    request: BookingRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """Создать запись на услугу"""
+    from datetime import datetime as dt_datetime, timedelta
+    
+    user_data = validate_init_data(request.init_data)
+    telegram_id = user_data["user_id"]
+    
+    user = await db.scalar(select(User).where(User.telegram_id == telegram_id))
+    if not user:
+        user = User(
+            telegram_id=telegram_id,
+            full_name=f"{user_data['first_name']} {user_data['last_name'] or ''}".strip(),
+            language_code=user_data.get("language_code", "uk"),
+            role=UserRole.CLIENT,
+            tenant_id=request.tenant_id,
+            is_active=True,
+        )
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
+    
+    is_active, _, _ = await check_tenant_subscription(request.tenant_id, db)
+    if not is_active:
+        raise HTTPException(status_code=403, detail="Subscription inactive")
+    
+    try:
+        dt_str = f"{request.date} {request.time}"
+        appointment_dt = dt_datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date/time format")
+    
+    master = await db.scalar(select(Master).where(
+        Master.id == request.master_id,
+        Master.tenant_id == request.tenant_id
+    ))
+    if not master:
+        raise HTTPException(status_code=404, detail="Master not found")
+    
+    service = await db.scalar(select(Service).where(
+        Service.id == request.service_id,
+        Service.tenant_id == request.tenant_id
+    ))
+    if not service:
+        raise HTTPException(status_code=404, detail="Service not found")
+    
+    slot_end = appointment_dt + timedelta(minutes=service.duration_minutes)
+    conflict = await db.scalar(
+        select(Appointment).where(
+            Appointment.master_id == request.master_id,
+            Appointment.datetime >= appointment_dt,
+            Appointment.datetime < slot_end,
+            Appointment.status != AppointmentStatus.CANCELLED,
+            Appointment.tenant_id == request.tenant_id,
+        )
+    )
+    if conflict:
+        raise HTTPException(status_code=409, detail="Time slot already booked")
+    
+    appointment = Appointment(
+        tenant_id=request.tenant_id,
+        master_id=request.master_id,
+        organization_id=master.organization_id,
+        client_id=user.id,
+        service_id=request.service_id,
+        datetime=appointment_dt,
+        status=AppointmentStatus.CONFIRMED,
+    )
+    db.add(appointment)
+    await db.commit()
+    
+    return {
+        "success": True,
+        "appointment_id": appointment.id,
+        "message": "Запись создана успешно"
+    }
 
 
 # Для запуска напрямую (например, для разработки)
