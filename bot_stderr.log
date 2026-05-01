@@ -1,0 +1,16 @@
+2026-05-01 10:44:56,782 | INFO | apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-05-01 10:44:56,896 | INFO | apscheduler.scheduler | Added job "_send_due_reminders" to job store "default"
+2026-05-01 10:44:56,953 | INFO | apscheduler.scheduler | Scheduler started
+2026-05-01 10:44:57,083 | INFO | __main__ | \U0001f680 Бот запущен и готов к работе!
+2026-05-01 10:44:58,036 | INFO | aiogram.dispatcher | Start polling
+2026-05-01 10:44:58,189 | INFO | aiogram.dispatcher | Run polling for bot @UPlatformBot id=8763790576 - 'UPlatformBot'
+2026-05-01 10:45:56,782 | INFO | apscheduler.executors.default | Running job "_send_due_reminders (trigger: interval[0:01:00], next run at: 2026-05-01 10:46:56 EEST)" (scheduled at 2026-05-01 10:45:56.765294+03:00)
+2026-05-01 10:45:56,864 | INFO | apscheduler.executors.default | Job "_send_due_reminders (trigger: interval[0:01:00], next run at: 2026-05-01 10:46:56 EEST)" executed successfully
+2026-05-01 10:46:56,771 | INFO | apscheduler.executors.default | Running job "_send_due_reminders (trigger: interval[0:01:00], next run at: 2026-05-01 10:47:56 EEST)" (scheduled at 2026-05-01 10:46:56.765294+03:00)
+2026-05-01 10:46:56,779 | INFO | apscheduler.executors.default | Job "_send_due_reminders (trigger: interval[0:01:00], next run at: 2026-05-01 10:47:56 EEST)" executed successfully
+2026-05-01 10:47:56,772 | INFO | apscheduler.executors.default | Running job "_send_due_reminders (trigger: interval[0:01:00], next run at: 2026-05-01 10:48:56 EEST)" (scheduled at 2026-05-01 10:47:56.765294+03:00)
+2026-05-01 10:47:56,782 | INFO | apscheduler.executors.default | Job "_send_due_reminders (trigger: interval[0:01:00], next run at: 2026-05-01 10:48:56 EEST)" executed successfully
+2026-05-01 10:48:56,770 | INFO | apscheduler.executors.default | Running job "_send_due_reminders (trigger: interval[0:01:00], next run at: 2026-05-01 10:49:56 EEST)" (scheduled at 2026-05-01 10:48:56.765294+03:00)
+2026-05-01 10:48:56,799 | INFO | apscheduler.executors.default | Job "_send_due_reminders (trigger: interval[0:01:00], next run at: 2026-05-01 10:49:56 EEST)" executed successfully
+2026-05-01 10:49:56,781 | INFO | apscheduler.executors.default | Running job "_send_due_reminders (trigger: interval[0:01:00], next run at: 2026-05-01 10:50:56 EEST)" (scheduled at 2026-05-01 10:49:56.765294+03:00)
+2026-05-01 10:49:56,802 | INFO | apscheduler.executors.default | Job "_send_due_reminders (trigger: interval[0:01:00], next run at: 2026-05-01 10:50:56 EEST)" executed successfully

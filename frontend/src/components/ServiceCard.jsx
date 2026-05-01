@@ -1,40 +1,62 @@
 import React from 'react';
-import PropTypes from 'prop-types';
 import { useTranslation } from 'react-i18next';
 
-const ServiceCard = ({ service, isSelected = false, onSelect }) => {
+function ServiceCard({ service, isSelected, onSelect }) {
   const { t } = useTranslation();
+
+  // Иконки для услуг
+  const getServiceIcon = (serviceName) => {
+    const name = serviceName.toLowerCase();
+    if (name.includes('стрижка')) return '✂️';
+    if (name.includes('укладка')) return '💇‍♀️';
+    if (name.includes('окрашивание')) return '🎨';
+    return '💅';
+  };
+
   return (
     <div
-      className={`cursor-pointer p-4 bg-card hover:bg-card-hover rounded-lg shadow-md transition-colors duration-200 ${isSelected ? 'border-2 border-accent' : ''}`}
       onClick={onSelect}
+      className={`
+        relative p-5 rounded-2xl cursor-pointer transition-all duration-300
+        ${isSelected 
+          ? 'bg-gradient-to-r from-purple-600 to-pink-500 text-white shadow-lg scale-[1.02]' 
+          : 'bg-white hover:bg-gray-50 text-gray-800 shadow-md hover:shadow-xl'
+        }
+        border-2 ${isSelected ? 'border-transparent' : 'border-gray-100'}
+      `}
       style={{
-        backgroundColor: 'var(--tg-theme-secondary-bg-color)',
-        color: 'var(--tg-theme-text-color)',
-        borderColor: 'var(--tg-theme-accent-color)',
+        backgroundColor: isSelected ? 'var(--tg-theme-button-color)' : '',
+        color: isSelected ? 'var(--tg-theme-button-text-color)' : '',
       }}
     >
-      <div className="flex justify-between items-start">
-        <div>
-          <h3 className="font-semibold mb-1">{service.name}</h3>
-          <p className="text-sm text-text/60">
-            {t('serviceCard.duration', { duration: service.duration_minutes })} • {t('serviceCard.price', { price: service.price.toFixed(2) })}
-          </p>
-        </div>
+      {/* Иконка услуги */}
+      <div className="text-4xl mb-3 text-center">{getServiceIcon(service.name)}</div>
+
+      {/* Название */}
+      <h3 className="text-lg font-bold mb-2 leading-tight text-center">
+        {service.name}
+      </h3>
+
+      {/* Длительность и цена */}
+      <div className="flex items-center justify-between mt-3">
+        <span className="text-sm opacity-80">
+          ⏱️ {service.duration_minutes} хв
+        </span>
+        <span className="text-xl font-bold">
+          {service.price} ₴
+        </span>
       </div>
+
+      {/* Индикатор выбора */}
+      {isSelected && (
+        <div className="absolute top-3 right-3 w-6 h-6 bg-white/30 rounded-full flex items-center justify-center">
+          <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+          </svg>
+        </div>
+      )}
     </div>
   );
-};
-
-ServiceCard.propTypes = {
-  service: PropTypes.shape({
-    id: PropTypes.number.isRequired,
-    name: PropTypes.string.isRequired,
-    duration_minutes: PropTypes.number.isRequired,
-    price: PropTypes.number.isRequired,
-  }).isRequired,
-  isSelected: PropTypes.bool,
-  onSelect: PropTypes.func.isRequired,
-};
+}
 
 export default ServiceCard;

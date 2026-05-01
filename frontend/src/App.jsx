@@ -140,33 +140,73 @@ function App() {
      return <div className="flex h-screen items-center justify-center text-red-500">{t('app.error')}</div>;
    }
  
-   return (
-     <div className="min-h-screen bg-background text-text p-4" 
-          style={{
-            backgroundColor: 'var(--tg-theme-bg-color)',
-            color: 'var(--tg-theme-text-color)',
-          }}>
-       <header className="mb-6">
-         <h1 className="text-xl font-bold text-center">{t('app.header', { tenantName })}</h1>
-       </header>
-       <main>
-         {services.length > 0 ? (
-           <div className="space-y-4">
-             {services.map((service) => (
-               <ServiceCard
-                 key={service.id}
-                 service={service}
-                 isSelected={selectedServiceId === service.id}
-                 onSelect={() => handleServiceSelect(service.id)}
-               />
-             ))}
-           </div>
-         ) : (
-           <p className="text-center text-text/60">{t('app.noServices')}</p>
-         )}
-       </main>
-     </div>
-   );
+    return (
+      <div className="min-h-screen">
+        {/* Градиентный хедер */}
+        <header className="page-header">
+          <h1>{t('app.header', { tenantName })}</h1>
+        </header>
+
+        {/* Основной контент */}
+        <main>
+          {loading ? (
+            <div className="loading-container">
+              <div className="spinner"></div>
+              <p className="text-lg" style={{ color: 'var(--tg-theme-hint-color)' }}>
+                {t('app.loading')}
+              </p>
+            </div>
+          ) : error ? (
+            <div className="error-container">
+              <div className="error-icon">⚠️</div>
+              <p className="text-xl font-semibold">{t('app.error')}</p>
+              <button
+                onClick={() => window.location.reload()}
+                className="mt-4 px-6 py-2 rounded-xl"
+                style={{
+                  backgroundColor: 'var(--tg-theme-button-color)',
+                  color: 'var(--tg-theme-button-text-color)',
+                }}
+              >
+                Перезагрузити
+              </button>
+            </div>
+          ) : services.length > 0 ? (
+            <div className="services-grid">
+              {services.map((service) => (
+                <ServiceCard
+                  key={service.id}
+                  service={service}
+                  isSelected={selectedServiceId === service.id}
+                  onSelect={() => handleServiceSelect(service.id)}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="empty-state">
+              <div className="empty-icon">📋</div>
+              <p className="text-lg">{t('app.noServices')}</p>
+            </div>
+          )}
+        </main>
+
+        {/* Кнопка подтверждения (если выбран сервис) */}
+        {selectedServiceId && (
+          <div className="fixed bottom-6 left-4 right-4">
+            <button
+              onClick={handleConfirm}
+              className="w-full py-4 rounded-2xl font-bold text-lg shadow-xl transform transition-all active:scale-95"
+              style={{
+                backgroundColor: 'var(--tg-theme-button-color)',
+                color: 'var(--tg-theme-button-text-color)',
+              }}
+            >
+              {t('app.confirmButton')}
+            </button>
+          </div>
+        )}
+      </div>
+    );
 }
 
 export default App;

@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from aiogram.utils.web_app import safe_parse_webapp_init_data
 
 from app.config import get_settings
-from app.database.engine import SessionLocal
+from app.database.engine import SessionLocal, init_models
 from app.database.models import User, Service, Tenant, UserRole
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,7 +23,12 @@ GRACE_PERIOD_DAYS = 3
 
 app = FastAPI(title="Telegram Mini App API")
 
-# Настройка CORS для работы с фронтендом на localhost:5173 и ngrok туннеле
+# Startup event — инициализируем БД при старте
+@app.on_event("startup")
+async def startup_event():
+    await init_models()
+
+# Настройка CORS для работы с фронтендом на localhost:5173/5174 и ngrok туннеле
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://localhost:5174", "https://silica-getup-fox.ngrok-free.dev"],

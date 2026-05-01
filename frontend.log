@@ -1,0 +1,23 @@
+
+> beauty-salon-mini-app@0.0.0 dev
+> vite
+
+
+  [32m[1mVITE[22m v4.5.14[39m  [2mready in [0m[1m1221[22m[2m[0m ms[22m
+
+  [32mâžœ[39m  [1mLocal[22m:   [36mhttp://localhost:[1m5173[22m/[39m
+[2m  [32mâžœ[39m  [1mNetwork[22m[2m: use [22m[1m--host[22m[2m to expose[22m
+[2m12:34:58[22m [36m[1m[vite][22m[39m [32mvite.config.js changed, restarting server...[39m
+Port 5173 is in use, trying another one...
+[2m12:35:03[22m [36m[1m[vite][22m[39m server restarted.
+
+  [32mâžœ[39m  [1mLocal[22m:   [36mhttp://localhost:[1m5174[22m/[39m
+  [32mâžœ[39m  [1mNetwork[22m: [36mhttp://192.168.0.134:[1m5174[22m/[39m
+[2m12:36:53[22m [36m[1m[vite][22m[39m [32mvite.config.js changed, restarting server...[39m
+Port 5173 is in use, trying another one...
+[2m12:36:53[22m [36m[1m[vite][22m[39m server restarted.
+
+  [32mâžœ[39m  [1mLocal[22m:   [36mhttp://localhost:[1m5174[22m/[39m
+  [32mâžœ[39m  [1mNetwork[22m: [36mhttp://192.168.0.134:[1m5174[22m/[39m
+
+D:\“­¨¢¥àá «ì­ ï ¯« âä®à¬ \frontend>
